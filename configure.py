@@ -1211,17 +1211,17 @@ config.libs = [
     Rel(
         "m424Dll",  # Blame it on the Crane
         objects={
-            Object(MatchingFor(*MATCH_USA), "REL/m424Dll/main.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m424Dll/map.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m424Dll/ball.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m424Dll/claw.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m424Dll/main.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m424Dll/map.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m424Dll/ball.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m424Dll/claw.c"),
         },
     ),
     Rel(
         "m425Dll",  # The Great Deflate
         objects={
-            Object(MatchingFor(*MATCH_USA), "REL/m425Dll/main.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m425Dll/thwomp.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m425Dll/main.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m425Dll/thwomp.c"),
         },
     ),
     Rel(
@@ -1233,17 +1233,17 @@ config.libs = [
     Rel(
         "m427Dll",  # Right Oar Left?
         objects={
-            Object(MatchingFor(*MATCH_USA), "REL/m427Dll/main.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m427Dll/map.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m427Dll/player.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m427Dll/main.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m427Dll/map.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m427Dll/player.c"),
         },
     ),
     Rel(
         "m428Dll",  # Cliffhangers
         objects={
-            Object(MatchingFor(*MATCH_USA), "REL/m428Dll/main.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m428Dll/map.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m428Dll/player.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m428Dll/main.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m428Dll/map.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m428Dll/player.c"),
         },
     ),
     Rel(
@@ -1255,9 +1255,9 @@ config.libs = [
     Rel(
         "m430Dll",  # Pair-a-sailing
         objects={
-            Object(MatchingFor(*MATCH_USA), "REL/m430Dll/main.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m430Dll/water.c"),
-            Object(MatchingFor(*MATCH_USA), "REL/m430Dll/player.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m430Dll/main.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m430Dll/water.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m430Dll/player.c"),
         },
     ),
     Rel(
