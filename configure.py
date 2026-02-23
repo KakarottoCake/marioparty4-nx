@@ -1384,24 +1384,24 @@ config.libs = [
     Rel(
         "m447dll",  # Archaeologuess
         objects={
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m447dll/main.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m447dll/stage.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m447dll/camera.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m447dll/player.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m447dll/player_col.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m447dll/block.c"),
+            Object(Matching, "REL/m447dll/main.c"),
+            Object(Matching, "REL/m447dll/stage.c"),
+            Object(Matching, "REL/m447dll/camera.c"),
+            Object(Matching, "REL/m447dll/player.c"),
+            Object(Matching, "REL/m447dll/player_col.c"),
+            Object(Matching, "REL/m447dll/block.c"),
         },
     ),
     Rel(
         "m448Dll",  # Goomba's Chip Flip
         objects={
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m448Dll/main.c"),
+            Object(Matching, "REL/m448Dll/main.c"),
         },
     ),
     Rel(
         "m449Dll",  # Kareening Koopa
         objects={
-            Object(MatchingFor(*MATCH_USA), "REL/m449Dll/main.c"),
+            Object(MatchingFor(*MATCH_USA, *MATCH_PAL), "REL/m449Dll/main.c"),
         },
     ),
     Rel(
@@ -1413,22 +1413,22 @@ config.libs = [
     Rel(
         "m451Dll",  # Jigsaw Jitters
         objects={
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m451Dll/m451.c"),
+            Object(Matching, "REL/m451Dll/m451.c"),
         },
     ),
     Rel(
         "m453Dll",  # Challenge Booksquirm
         objects={
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m453Dll/main.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m453Dll/map.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m453Dll/score.c"),
+            Object(Matching, "REL/m453Dll/main.c"),
+            Object(Matching, "REL/m453Dll/map.c"),
+            Object(Matching, "REL/m453Dll/score.c"),
         },
     ),
     Rel(
         "m455Dll",  # Rumble Fishing
         objects={
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m455Dll/main.c"),
-            Object(MatchingFor(*MATCH_USA, "GMPJ01_00"), "REL/m455Dll/stage.c"),
+            Object(Matching, "REL/m455Dll/main.c"),
+            Object(Matching, "REL/m455Dll/stage.c"),
         },
     ),
     Rel(
