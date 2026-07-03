@@ -1,0 +1,5 @@
+# Build artifacts for the Switch port
+*.o
+*.elf
+*.nro
+build/

@@ -16,6 +16,33 @@ extern "C" {
 #define OS_FASTCAST_S8 4
 #define OS_FASTCAST_S16 5
 // clang-format off
+#ifdef __SWITCH__
+static inline void OSInitFastCast(void) {}
+
+static inline s16 __OSf32tos16(float inF) { return (s16)inF; }
+static inline void OSf32tos16(float *f, s16 *out) { *out = (s16)*f; }
+
+static inline u8 __OSf32tou8(float inF) { return (u8)inF; }
+static inline void OSf32tou8(float *f, u8 *out) { *out = (u8)*f; }
+
+static inline s8 __OSf32tos8(float inF) { return (s8)inF; }
+static inline void OSf32tos8(float *f, s8 *out) { *out = (s8)*f; }
+
+static inline u16 __OSf32tou16(float inF) { return (u16)inF; }
+static inline void OSf32tou16(float *f, u16 *out) { *out = (u16)*f; }
+
+static inline float __OSs8tof32(const s8* arg) { return (float)*arg; }
+static inline void OSs8tof32(const s8* in, float* out) { *out = (float)*in; }
+
+static inline float __OSs16tof32(const s16* arg) { return (float)*arg; }
+static inline void OSs16tof32(const s16* in, float* out) { *out = (float)*in; }
+
+static inline float __OSu8tof32(const u8* arg) { return (float)*arg; }
+static inline void OSu8tof32(const u8* in, float* out) { *out = (float)*in; }
+
+static inline float __OSu16tof32(const u16* arg) { return (float)*arg; }
+static inline void OSu16tof32(const u16* in, float* out) { *out = (float)*in; }
+#else
 static inline void OSInitFastCast(void) {
 #ifdef __MWERKS__
   asm
@@ -158,6 +185,7 @@ static inline float __OSu16tof32(register const u16* arg) {
 }
 
 static inline void OSu16tof32(const u16* in, float* out) { *out = __OSu16tof32(in); }
+#endif
 
 #ifdef __cplusplus
 }

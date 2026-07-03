@@ -48,7 +48,11 @@ static void *HuMemMemoryAlloc2(void *heap_ptr, s32 size, u32 num, u32 retaddr)
     do {
         if(!block->flag && block->size >= alloc_size) {
             if(block->size-alloc_size > 32u) {
+#ifdef __SWITCH__
+                struct memory_block *new_block = (struct memory_block *)(((uintptr_t)block)+alloc_size);
+#else
                 struct memory_block *new_block = (struct memory_block *)(((u32)block)+alloc_size);
+#endif
                 new_block->size = block->size-alloc_size;
                 new_block->magic = 205;
                 new_block->flag = 0;

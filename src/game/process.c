@@ -81,9 +81,15 @@ HUPROCESS *HuPrcCreate(void (*func)(void), u16 prio, u32 stack_size, s32 extra_s
     process->stat = 0;
     process->prio = prio;
     process->sleep_time = 0;
+#ifdef __SWITCH__
+    process->base_sp = ((uintptr_t)HuMemMemoryAlloc(heap, stack_size, FAKE_RETADDR))+stack_size-8;
+    gcsetjmp(&process->jump);
+    process->jump.lr = (uintptr_t)func;
+#else
     process->base_sp = ((u32)HuMemMemoryAlloc(heap, stack_size, FAKE_RETADDR))+stack_size-8;
     gcsetjmp(&process->jump);
     process->jump.lr = (u32)func;
+#endif
     process->jump.sp = process->base_sp;
     process->dtor = NULL;
     process->user_data = NULL;
@@ -279,7 +285,11 @@ void HuPrcCall(s32 tick)
                 break;
                 
             case EXEC_KILLED:
+#ifdef __SWITCH__
+                process->jump.lr = (uintptr_t)HuPrcEnd;
+#else
                 process->jump.lr = (u32)HuPrcEnd;
+#endif
             case EXEC_NORMAL:
                 gclongjmp(&process->jump, 1);
                 break;

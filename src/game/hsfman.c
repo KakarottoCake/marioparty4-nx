@@ -2,6 +2,10 @@
 #include "game/ClusterExec.h"
 #include "game/data.h"
 #include "game/EnvelopeExec.h"
+
+#ifdef __SWITCH__
+#include "platform/switch/projection_override/projection_override.h"
+#endif
 #include "game/hsfload.h"
 #include "game/init.h"
 #include "game/memory.h"
@@ -1120,6 +1124,10 @@ void Hu3DCameraPerspectiveSet(s32 cam, f32 fov, f32 near, f32 far, f32 aspect) {
     s16 mask;
     s16 i;
     HU3DCAMERA* cam_ptr;
+
+#ifdef __SWITCH__
+    aspect = OverrideProjectionAspect(aspect);
+#endif
 
     for (i = 0, mask = 1; i < HU3D_CAM_MAX; i++, mask <<= 1) {
         if ((cam & mask) != 0) {
