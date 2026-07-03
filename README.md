@@ -11,6 +11,15 @@ Mario Party 4
 [Discord Badge]: https://img.shields.io/discord/994839212618690590?color=%237289DA&logo=discord&logoColor=%23FFFFFF
 [discord]: https://discord.gg/T4faGveujK
 
+> ### 🎮 Nintendo Switch native port (experimental, WIP)
+> This fork adds an experimental native Switch (`.nro`) port under
+> [`src/platform/switch/`](src/platform/switch/). It currently **boots and runs the
+> real engine loop but does not render game content yet** (blocked on a 32-bit vs
+> 64-bit data-layout issue). See
+> **[src/platform/switch/README.md](src/platform/switch/README.md)** for status,
+> build/run instructions, architecture, and the known blockers. Shared as a
+> starting point for anyone who wants to take it further.
+
 A work-in-progress decompilation of Mario Party 4. While the two USA versions are completely matching, most non-game-engine code is not documented at all. Work on the PAL and JP versions is currently stale, as it involves a lot of repetitive work, which could be done much easier later when there is special tooling for porting splits and symbols between versions.
 
 There is **NO** working PC port yet, but it is in the making.
