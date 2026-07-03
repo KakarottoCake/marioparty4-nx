@@ -71,6 +71,9 @@ struct DVDFileInfo {
   u32 startAddr;
   u32 length;
   DVDCallback callback;
+#ifdef __SWITCH__
+  void* fileHandle;
+#endif
 };
 
 typedef struct {

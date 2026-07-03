@@ -283,10 +283,19 @@ static void GetFileInfo(HUDATASTAT *readStat, s32 fileNum)
 {
     u32 *ptr;
     ptr = (u32 *)PTR_OFFSET(readStat->dirP, (fileNum * 4))+1;
+#ifdef __SWITCH__
+    // Game data files are big-endian (GameCube/PPC). On little-endian ARM the
+    // 32-bit header fields must be byte-swapped when read directly.
+    readStat->fileDataP = PTR_OFFSET(readStat->dirP, __builtin_bswap32(*ptr));
+    ptr = readStat->fileDataP;
+    readStat->rawLen = __builtin_bswap32(*ptr++);
+    readStat->decodeType = __builtin_bswap32(*ptr++);
+#else
     readStat->fileDataP = PTR_OFFSET(readStat->dirP, *ptr);
     ptr = readStat->fileDataP;
     readStat->rawLen = *ptr++;
     readStat->decodeType = *ptr++;
+#endif
     readStat->fileDataP = ptr;
 }
 

@@ -2,6 +2,10 @@
 #include "game/msm.h"
 #include "game/pad.h"
 
+#ifdef __SWITCH__
+#include "platform/switch/controller.h"
+#endif
+
 #ifndef __MWERKS__
 #include <stdlib.h>
 #endif
@@ -62,6 +66,9 @@ void HuPadInit(void)
     int_level = OSDisableInterrupts();
     VISetPostRetraceCallback(PadReadVSync);
     OSRestoreInterrupts(int_level);
+#ifdef __SWITCH__
+    Switch_InitControllers();
+#endif
     for(i=0; i<4; i++) {
         padStatErrOld[i] = PAD_ERR_NOT_READY;
     }
@@ -132,6 +139,9 @@ void HuPadInit(void)
  */
 void HuPadRead(void)
 {
+#ifdef __SWITCH__
+    Switch_UpdateControllers();
+#endif
     s16 i;
     for(i=0; i<4; i++) {
         HuPadBtn[i] = _PadBtn[i] & ~(PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT | PAD_BUTTON_UP | PAD_BUTTON_DOWN);

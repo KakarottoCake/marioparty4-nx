@@ -1,6 +1,9 @@
 #ifndef _DOLPHIN_TYPES
 #define _DOLPHIN_TYPES
 
+#ifdef __SWITCH__
+// Switch types are handled by <switch/types.h> included via switch.h
+#else
 #ifdef TARGET_PC
 #include <stdint.h>
 typedef int8_t s8;
@@ -31,12 +34,15 @@ typedef volatile s8 vs8;
 typedef volatile s16 vs16;
 typedef volatile s32 vs32;
 typedef volatile s64 vs64;
+#endif
 
 typedef float f32;
 typedef double f64;
 
+#if !defined(__SWITCH__)
 typedef volatile f32 vf32;
 typedef volatile f64 vf64;
+#endif
 
 #if defined(TARGET_PC) && !defined(_WIN32)
 #include <stdbool.h>

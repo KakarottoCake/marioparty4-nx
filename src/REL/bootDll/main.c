@@ -53,7 +53,11 @@ BOOL BootTitleExec(void);
 
 void *NintendoDataDecode(void);
 
+#ifdef __SWITCH__
+void bootDll_ObjectSetup(void)
+#else
 void ObjectSetup(void)
+#endif
 {
     OMOVLHIS *history;
     OSReport("******* Boot ObjectSetup *********\n");
@@ -776,9 +780,16 @@ BOOL BootTitleExec(void)
 void *NintendoDataDecode(void)
 {
     u32 *src = (u32 *)nintendoData;
+#ifdef __SWITCH__
+    // Embedded data is big-endian (GameCube); byte-swap the 32-bit header on ARM.
+    u32 size = __builtin_bswap32(*src++);
+    void *dst = HuMemDirectMalloc(HEAP_MODEL, size);
+    int decode_type = __builtin_bswap32(*src++);
+#else
     u32 size = *src++;
     void *dst = HuMemDirectMalloc(HEAP_MODEL, size);
     int decode_type = *src++;
+#endif
     if(dst) {
         HuDecodeData(src, dst, size, decode_type);
     }

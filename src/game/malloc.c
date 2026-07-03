@@ -11,16 +11,28 @@ void HuMemInitAll(void)
     void *ptr;
     u32 free_size;
     for(i=0; i<4; i++) {
+#ifdef __SWITCH__
+        ptr = malloc(HeapSizeTbl[i]);
+#else
         ptr = OSAlloc(HeapSizeTbl[i]);
+#endif
         if(ptr == NULL) {
             OSReport("HuMem> Failed OSAlloc Size:%d\n", HeapSizeTbl[i]);
             return;
         }
         HeapTbl[i] = HuMemInit(ptr, HeapSizeTbl[i]);
     }
+#ifdef __SWITCH__
+    free_size = 0x1000000; // 16MB mock space
+#else
     free_size = OSCheckHeap(currentHeapHandle);
+#endif
     OSReport("HuMem> left memory space %dKB(%d)\n", free_size/1024, free_size);
+#ifdef __SWITCH__
+    ptr = malloc(free_size);
+#else
     ptr = OSAlloc(free_size);
+#endif
     if(ptr == NULL) {
         OSReport("HuMem> Failed OSAlloc left space\n");
         return;
@@ -48,9 +60,13 @@ void HuMemDCFlush(HeapID heap)
 void *HuMemDirectMalloc(HeapID heap, s32 size)
 {
     register u32 retaddr;
+#ifdef __SWITCH__
+    retaddr = (u32)(uintptr_t)__builtin_return_address(0);
+#else
     asm {
         mflr retaddr
     }
+#endif
     size = (size+31) & 0xFFFFFFE0;
     return HuMemMemoryAlloc(HeapTbl[heap], size, retaddr);
 }
@@ -58,9 +74,13 @@ void *HuMemDirectMalloc(HeapID heap, s32 size)
 void *HuMemDirectMallocNum(HeapID heap, s32 size, u32 num)
 {
     register u32 retaddr;
+#ifdef __SWITCH__
+    retaddr = (u32)(uintptr_t)__builtin_return_address(0);
+#else
     asm {
         mflr retaddr
     }
+#endif
     size = (size+31) & 0xFFFFFFE0;
     return HuMemMemoryAllocNum(HeapTbl[heap], size, num, retaddr);
 }
@@ -68,18 +88,26 @@ void *HuMemDirectMallocNum(HeapID heap, s32 size, u32 num)
 void HuMemDirectFree(void *ptr)
 {
     register u32 retaddr;
+#ifdef __SWITCH__
+    retaddr = (u32)(uintptr_t)__builtin_return_address(0);
+#else
     asm {
         mflr retaddr
     }
+#endif
     HuMemMemoryFree(ptr, retaddr);
 }
 
 void HuMemDirectFreeNum(HeapID heap, u32 num)
 {
     register u32 retaddr;
+#ifdef __SWITCH__
+    retaddr = (u32)(uintptr_t)__builtin_return_address(0);
+#else
     asm {
         mflr retaddr
     }
+#endif
     HuMemMemoryFreeNum(HeapTbl[heap], num, retaddr);
 }
 

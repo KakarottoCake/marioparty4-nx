@@ -32,7 +32,11 @@ typedef struct Process_s {
     u16 stat;
     u16 prio;
     s32 sleep_time;
+#ifdef __SWITCH__
+    u64 base_sp;
+#else
     u32 base_sp;
+#endif
     jmp_buf jump;
     void (*dtor)(void);
     void *user_data; // TODO rename to property

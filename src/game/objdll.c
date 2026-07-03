@@ -93,6 +93,31 @@ void omDLLEnd(s16 dllno, s16 flag)
 
 omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag)
 {
+#ifdef __SWITCH__
+	omDllData *dll;
+	FileListEntry *dllFile = &omDLLFileList[overlay];
+	OSReport("objdll> [SWITCH] Link Static DLL:%s (ID: %d)\n", dllFile->name, overlay);
+	dll = HuMemDirectMalloc(HEAP_HEAP, sizeof(omDllData));
+	*dll_ptr = dll;
+	dll->name = dllFile->name;
+	dll->module = NULL;
+	dll->bss = NULL;
+	
+	extern void bootDll_ObjectSetup(void);
+	
+	// Map bootDll to its statically linked ObjectSetup function.
+	// The overlay name is "dll/bootdll.rel" (lowercase, path-prefixed), so match
+	// on the substring rather than an exact string compare.
+	if (strstr(dll->name, "bootdll") != NULL || strstr(dll->name, "bootDll") != NULL) {
+		dll->ret = 0;
+		if (flag == 1) {
+			OSReport("objdll> [SWITCH] %s prolog start\n", dllFile->name);
+			bootDll_ObjectSetup();
+			OSReport("objdll> [SWITCH] %s prolog end\n", dllFile->name);
+		}
+	}
+	return dll;
+#else
 	omDllData *dll;
 	FileListEntry *dllFile = &omDLLFileList[overlay];
 	OSReport("objdll>Link DLL:%s\n", dllFile->name);
@@ -113,10 +138,15 @@ omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag)
 		OSReport("objdll> %s prolog end\n", dllFile->name);
 	}
 	return dll;
+#endif
 }
 
 void omDLLUnlink(omDllData *dll_ptr, s16 flag)
 {
+#ifdef __SWITCH__
+	OSReport("objdll> [SWITCH] Unlink DLL:%s\n", dll_ptr->name);
+	HuMemDirectFree(dll_ptr);
+#else
 	OSReport("odjdll>Unlink DLL:%s\n", dll_ptr->name);
 	if(flag == 1) {
 		OSReport("objdll>Unlink DLL epilog\n");
@@ -129,6 +159,7 @@ void omDLLUnlink(omDllData *dll_ptr, s16 flag)
 	HuMemDirectFree(dll_ptr->bss);
 	HuMemDirectFree(dll_ptr->module);
 	HuMemDirectFree(dll_ptr);
+#endif
 }
 
 s32 omDLLSearch(s16 overlay)

@@ -41,7 +41,11 @@ static u32 fi_req;
 s32 HuDvdErrWait;
 s32 SystemInitF;
 
+#ifdef __SWITCH__
+void game_main(void)
+#else
 void main(void)
+#endif
 {
     u32 met0;
     u32 met1;
