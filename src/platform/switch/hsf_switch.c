@@ -2467,10 +2467,27 @@ static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index,
                                BOOL useVertexColor,
                                const HSFATTRIBUTE *attribute) {
     s32 vertexIndex = index[0];
+    s32 normalIndex = index[1];
     if (!object->mesh.vertex || vertexIndex < 0 ||
         vertexIndex >= object->mesh.vertex->count) {
         GXPosition3f32(0.0f, 0.0f, 0.0f);
         return;
+    }
+    if (object->mesh.normal && object->mesh.normal->data && normalIndex >= 0 &&
+        normalIndex < object->mesh.normal->count) {
+        if (object->mesh.file[1]) {
+            const Vec *normal = (const Vec *)object->mesh.file[1];
+            GXNormal3f32(normal[normalIndex].x, normal[normalIndex].y,
+                         normal[normalIndex].z);
+        } else {
+            /* Static HSF normals use the compact signed 8-bit form. */
+            const HSFS8VEC *normal = (const HSFS8VEC *)object->mesh.normal->data;
+            GXNormal3f32((float)normal[normalIndex].x / 127.0f,
+                         (float)normal[normalIndex].y / 127.0f,
+                         (float)normal[normalIndex].z / 127.0f);
+        }
+    } else {
+        GXNormal3f32(0.0f, 0.0f, 1.0f);
     }
     {
         const HuVecF *vertex = object->mesh.file[0] ?
