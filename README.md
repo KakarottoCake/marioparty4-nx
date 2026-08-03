@@ -35,8 +35,8 @@ What works:
 - Decodes the GameCube tiled 2D texture formats used by sprites, including C4/C8
   palettes and TLUT uploads, and sends textured quads through OpenGL.
 - Converts big-endian, 32-bit-offset HSF model tables into native structures and
-  draws static triangle/quad meshes through the OpenGL path, including the first
-  HSF bitmap/palette and depth-tested texture path.
+  draws static triangle/quad/strip meshes through the OpenGL path, including the
+  first HSF bitmap/palette and depth-tested texture path.
 - Provides real Switch system tick/time values and avoids the zero-byte audio
   staging allocation that corrupted the legacy heap.
 - Reads up to four Switch controller slots, including native GameCube and Pro

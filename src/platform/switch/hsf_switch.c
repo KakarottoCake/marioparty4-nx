@@ -408,11 +408,41 @@ static HSFBUFFER *SwitchHsfParseFaces(SwitchHsfContext *ctx) {
             face->nbt.x = SwitchHsfF32(rawFace + 0x24);
             face->nbt.y = SwitchHsfF32(rawFace + 0x28);
             face->nbt.z = SwitchHsfF32(rawFace + 0x2C);
-            /* Static meshes use triangles/quads.  Strip expansion is added
-             * after the first stable 3D frame; leaving it empty is safe. */
             if ((face->type & HSF_FACE_MASK) == HSF_FACE_TRISTRIP) {
-                face->strip.count = 0;
-                face->strip.data = NULL;
+                u32 stripCount = SwitchHsfBE32(rawFace + 0x1C);
+                u32 stripOfs = SwitchHsfBE32(rawFace + 0x20);
+                u32 stripBytes;
+                u8 *stripData;
+                u32 stripIndex;
+                if (stripCount > SWITCH_HSF_MAX_COUNT ||
+                    stripCount > 0x3FFFFFFFU / 8U ||
+                    stripOfs > 0x3FFFFFFFU / 8U) {
+                    face->strip.count = 0;
+                    face->strip.data = NULL;
+                    continue;
+                }
+                stripBytes = stripCount * 8U;
+                if (stripOfs > (ctx->rawSize - dataBase) / 8U ||
+                    !SwitchHsfRange(ctx, dataBase + stripOfs * 8U, stripBytes)) {
+                    face->strip.count = 0;
+                    face->strip.data = NULL;
+                    continue;
+                }
+                stripData = (u8 *)SwitchHsfArenaAlloc(
+                    &ctx->arena, stripBytes ? stripBytes : 1);
+                if (!stripData) {
+                    return NULL;
+                }
+                for (stripIndex = 0; stripIndex < stripCount; stripIndex++) {
+                    s32 corner;
+                    for (corner = 0; corner < 4; corner++) {
+                        ((s16 *)stripData)[stripIndex * 4 + corner] =
+                            SwitchHsfS16(ctx->raw + dataBase + stripOfs * 8U +
+                                         stripIndex * 8U + corner * 2U);
+                    }
+                }
+                face->strip.count = stripCount;
+                face->strip.data = (s16 *)stripData;
             }
         }
     }
@@ -1094,6 +1124,26 @@ static BOOL SwitchHsfEstimateFaces(const SwitchHsfContext *ctx, u32 *total) {
                                    count ? count * sizeof(HSFFACE) : 1)) {
             return FALSE;
         }
+        for (u32 j = 0; j < count; j++) {
+            const u8 *rawFace = ctx->raw + dataBase + dataOfs +
+                                j * SWITCH_HSF_FACE_SIZE;
+            if ((SwitchHsfBE16(rawFace) & HSF_FACE_MASK) == HSF_FACE_TRISTRIP) {
+                u32 stripCount = SwitchHsfBE32(rawFace + 0x1C);
+                u32 stripOfs = SwitchHsfBE32(rawFace + 0x20);
+                u32 stripBytes;
+                if (stripCount > SWITCH_HSF_MAX_COUNT ||
+                    stripCount > 0x3FFFFFFFU / 8U ||
+                    stripOfs > 0x3FFFFFFFU / 8U) {
+                    return FALSE;
+                }
+                stripBytes = stripCount * 8U;
+                if (stripOfs > (ctx->rawSize - dataBase) / 8U ||
+                    !SwitchHsfRange(ctx, dataBase + stripOfs * 8U, stripBytes) ||
+                    !SwitchHsfEstimateAdd(total, 1, stripBytes ? stripBytes : 1)) {
+                    return FALSE;
+                }
+            }
+        }
     }
     return TRUE;
 }
@@ -1430,9 +1480,8 @@ static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
     GXLoadTexObj(&texObj, GX_TEXMAP0);
 }
 
-static void SwitchHsfEmitVertex(const HSFOBJECT *object, const HSFFACE *face,
-                                s32 corner) {
-    s32 vertexIndex = face->indices[corner][0];
+static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index) {
+    s32 vertexIndex = index[0];
     if (!object->mesh.vertex || vertexIndex < 0 ||
         vertexIndex >= object->mesh.vertex->count) {
         GXPosition3f32(0.0f, 0.0f, 0.0f);
@@ -1444,12 +1493,15 @@ static void SwitchHsfEmitVertex(const HSFOBJECT *object, const HSFFACE *face,
                        vertex[vertexIndex].z);
     }
     if (object->mesh.st && object->mesh.st->data &&
-        face->indices[corner][2] >= 0 &&
-        face->indices[corner][2] < object->mesh.st->count) {
+        index[2] >= 0 && index[2] < object->mesh.st->count) {
         const HuVec2f *st = (const HuVec2f *)object->mesh.st->data;
-        GXTexCoord2f32(st[face->indices[corner][2]].x,
-                       st[face->indices[corner][2]].y);
+        GXTexCoord2f32(st[index[2]].x, st[index[2]].y);
     }
+}
+
+static void SwitchHsfEmitVertex(const HSFOBJECT *object, const HSFFACE *face,
+                                s32 corner) {
+    SwitchHsfEmitIndex(object, face->indices[corner]);
 }
 
 static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount) {
@@ -1475,6 +1527,14 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount) {
         } else if (type == HSF_FACE_TRI) {
             needed = 3;
             type = HSF_FACE_TRI;
+        } else if (type == HSF_FACE_TRISTRIP) {
+            if (face->strip.count <= 0 || !face->strip.data) {
+                continue;
+            }
+            needed = face->strip.count + 3;
+            if (needed > 60) {
+                continue;
+            }
         } else {
             continue;
         }
@@ -1489,12 +1549,24 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount) {
             currentMat = face->mat;
             SwitchHsfSetMaterial(object, currentMat & 0x0FFF, materialCount);
             SwitchHsfSetTexture(object, currentMat & 0x0FFF, materialCount);
-            GXBegin(type == HSF_FACE_QUAD ? GX_QUADS : GX_TRIANGLES,
+            GXBegin(type == HSF_FACE_QUAD ? GX_QUADS :
+                    (type == HSF_FACE_TRISTRIP ? GX_TRIANGLESTRIP : GX_TRIANGLES),
                     GX_VTXFMT0, 0);
             open = TRUE;
         }
-        for (corner = 0; corner < needed; corner++) {
-            SwitchHsfEmitVertex(object, face, corner);
+        if (type == HSF_FACE_TRISTRIP) {
+            static const s32 firstCorner[3] = {0, 2, 1};
+            s16 *strip = face->strip.data;
+            for (corner = 0; corner < 3; corner++) {
+                SwitchHsfEmitVertex(object, face, firstCorner[corner]);
+            }
+            for (corner = 0; corner < face->strip.count; corner++) {
+                SwitchHsfEmitIndex(object, strip + corner * 4);
+            }
+        } else {
+            for (corner = 0; corner < needed; corner++) {
+                SwitchHsfEmitVertex(object, face, corner);
+            }
         }
         vertices += needed;
     }
