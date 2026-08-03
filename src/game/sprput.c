@@ -50,6 +50,12 @@ void HuSprDisp(HUSPRITE *sprite)
     Mtx modelview, rot;
     short color_sum;
     HUSPRFUNC func;
+
+#ifdef __SWITCH__
+    if(!anim || (uintptr_t)anim < 0x1000) {
+        return;
+    }
+#endif
     
     GXSetScissor(sprite->scissorX, sprite->scissorY, sprite->scissorW, sprite->scissorH);
     if(sprite->attr & HUSPR_ATTR_FUNC) {

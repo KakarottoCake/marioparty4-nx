@@ -13,10 +13,10 @@ The long-term goal is a clean port plus quality-of-life extras: native GameCube
 controller support on Switch, and dynamic button glyphs that adapt to whichever
 controller is in use.
 
-> **Status: boots and runs the real engine loop, but does not render game content
-> yet (black screen).** It is shared as a starting point for anyone who wants to
-> take it further. The [Known blockers](#known-blockers) section is the important
-> part.
+> **Status: the real engine boots, the native ANIM sprite loader is working, and
+> the 2D path reaches OpenGL textured draws in Eden.** The full visible game is
+> not finished: HSF/3D rendering, audio, saves, UI glyph integration, and
+> several overlays still need work.
 
 This repository contains **no game assets** — an existing, legally-obtained copy of
 the game is required to supply the data files.
@@ -28,20 +28,29 @@ the game is required to supply the data files.
 What works:
 - Builds to a working `marioparty4_switch.nro`.
 - Boots on Switch hardware (Atmosphère) and emulators (Eden/Ryujinx).
-- Sets up an EGL + OpenGL ES 2 rendering context (verified: a test quad rendered
-  on screen).
+- Sets up an EGL + OpenGL ES 2 rendering context.
 - Loads the game's data files from the SD card (virtual DVD/FST layer).
+- Converts the big-endian, 32-bit-offset `ANIM` sprite format into native
+  64-bit structures instead of mapping it directly over Switch memory.
+- Decodes the GameCube tiled 2D texture formats used by sprites, including C4/C8
+  palettes and TLUT uploads, and sends textured quads through OpenGL.
+- Provides real Switch system tick/time values and avoids the zero-byte audio
+  staging allocation that corrupted the legacy heap.
+- Reads up to four Switch controller slots, including native GameCube and Pro
+  styles, with per-player button/stick state and a controller-aware glyph lookup.
 - Statically links the `bootDll` overlay (the GameCube uses dynamically linked
   `.rel` overlays; this port links them in and calls their setup directly).
 - Runs the engine's real boot sequence: `game_main` → `omMasterInit` →
   `bootDll` `ObjectSetup` → the `BootExec` process and main frame loop, with no
-  crashes.
+  allocator/free-list errors in the latest controlled Eden run.
 
 What does **not** work yet:
-- **Nothing renders (black screen).** The GameCube `GX` graphics calls are mostly
-  stubs. A partial `GX → OpenGL` translation layer exists for 2D sprites, but it
-  is blocked by the data-layout issue described below.
-- No audio, save data, or real controller mapping beyond a minimal stub.
+- Complete visible boot artwork and menus still need validation and cleanup on
+  hardware. The 2D path is wired, but it is not a finished renderer.
+- HSF model loading and 3D rendering are still placeholders; no game board or
+  minigame scene is rendered yet.
+- No audio or save data yet. Glyph lookup exists, but the original UI has not yet
+  been fully wired to replace every on-screen button prompt.
 - Only `bootDll` is wired up; every other overlay currently stub-links and does
   nothing.
 
@@ -103,7 +112,7 @@ Everything platform-specific lives in `src/platform/switch/`:
 | `gfx_switch.c/.h` | EGL/GLES2 setup, framebuffer clear/present, and the 2D shader pipelines (solid + textured). |
 | `gx_gl.c` | The `GX → OpenGL` translation layer (compiled with `-DTARGET_PC`): matrix math, immediate-mode vertex capture, and GameCube texture decoding. Used by the 2D sprite path. |
 | `dvd_switch.c` | Virtual DVD/FST: scans the asset folder and maps GameCube `DVD*` file calls to real files. Also hosts `OSReport` logging. |
-| `controller.c/.h` | Minimal libnx pad reading. (Intended home of the GameCube-controller + button-glyph QoL work.) |
+| `controller.c/.h` | libnx pad reading for four players, controller-type detection, and the controller-aware button-glyph lookup. |
 | `jmp_switch.s` | Small assembly shim. |
 | `projection_override/` | Aspect-ratio override hook. |
 | `prepare_headers.py` | Sets up `build/include` header junctions before compiling. |
@@ -117,29 +126,27 @@ hsfman,pad,sprman,sprput}.c` and `src/REL/bootDll/{main,language}.c`. See the
 
 ## Known blockers
 
-These are the two systemic issues standing between "boots" and "renders". Both are
-inherent to porting a big-endian, 32-bit GameCube title to a little-endian, 64-bit
-ARM device.
+These are the main remaining issues between the current boot/2D progress and a
+playable port. They come from moving a big-endian, 32-bit GameCube title to a
+little-endian, 64-bit ARM device.
 
 ### 1. Endianness (big-endian data on a little-endian CPU)
-The GameCube is big-endian; the Switch is little-endian. Every multi-byte value the
-engine reads **directly out of a data file** comes out byte-reversed. Fixed so far
-at a few spots (search the tree for `__builtin_bswap`): `src/game/data.c`
-`GetFileInfo` and `src/REL/bootDll/main.c` `NintendoDataDecode`. It recurs in every
-data format's loader (sprite anim banks, HSF models, message data, etc.). The
-decompression routines in `src/game/decode.c` are already endian-safe.
+The GameCube is big-endian; the Switch is little-endian. Every multi-byte value
+the engine reads directly out of a data file must be decoded explicitly. Fixed so
+far in `src/game/data.c`, `src/REL/bootDll/main.c`, and the native `ANIM` loader in
+`src/game/sprman.c`. It still recurs in HSF models, message data, and other
+formats. The decompression routines in `src/game/decode.c` are already endian-safe.
 
-### 2. 32-bit vs 64-bit pointer layout (the current wall)
+### 2. 32-bit vs 64-bit pointer layout
 GameCube data files store pointers/offsets as **4 bytes**. The Switch is 64-bit, so
 pointers in memory are **8 bytes**. Any struct the engine maps directly over file
 data that *contains pointer fields* therefore has a **mismatched layout** — fields
 after the first pointer land at the wrong offset, producing garbage and reads from
 near-null addresses.
 
-Concrete example (where sprite/logo rendering currently dies): `ANIMDATA` in
-`include/game/animdata.h` is 20 bytes in the file (32-bit pointers) but 32 bytes
-when compiled for 64-bit, so `HuSprAnimRead` in `src/game/sprman.c` reads its
-fields at the wrong offsets and skips relocation.
+The sprite `ANIM` format is now handled by a dedicated loader. HSF and other
+formats still need the same treatment: parse their 32-bit file offsets, allocate
+native structures, and relocate the pointers explicitly.
 
 **You cannot fix this by compiling 32-bit — Switch homebrew (libnx) is 64-bit
 only.** It has to be handled in software. Reasonable approaches:
@@ -149,17 +156,17 @@ only.** It has to be handled in software. Reasonable approaches:
   file-struct pointer members as 32-bit offsets and keep the game heap inside the
   low 4 GB so addresses fit; access via base+offset.
 
-Getting one 2D format (the sprite/`ANIM` path) through this is the natural next
-step and would put the first real game graphics (the boot logos) on screen.
+The next major step is a safe HSF loader and a real 3D display-list/material
+translation layer.
 
 ---
 
 ## Roadmap (rough)
-1. Solve the 32-bit/64-bit data-layout problem for the 2D sprite path → boot logos.
-2. Fill in endianness fixes per subsystem as they're hit.
+1. Validate and finish the 2D sprite path on hardware.
+2. Add safe endian/offset loaders for HSF models and remaining formats.
 3. Flesh out the `GX → OpenGL` layer (TEV → shaders) and wire the 3D/HSF model path.
-4. Audio, save data, real input mapping.
-5. QoL: native GameCube controller support + dynamic button glyphs.
+4. Audio and save data.
+5. Wire the dynamic glyph lookup through every original UI prompt.
 6. Statically wire the remaining overlays.
 
 ---
@@ -167,7 +174,7 @@ step and would put the first real game graphics (the boot logos) on screen.
 ## Credits
 - Built on the [Mario Party 4 decompilation](https://github.com/mariopartyrd/marioparty4)
   by the mariopartyrd team — this fork only adds the `src/platform/switch/` layer
-  and minor `#ifdef __SWITCH__` tweaks to shared engine files.
+  plus the required `#ifdef __SWITCH__` compatibility code in shared engine files.
 - Uses [devkitPro / libnx](https://devkitpro.org/).
 
 Contributions welcome. This is early scaffolding, not a finished port.
