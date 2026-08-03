@@ -16,7 +16,7 @@ LDFLAGS := -specs="$(DEVKITPRO)/libnx/switch.specs" -g -march=armv8-a+crc+crypto
 # GL rendering stack (devkitPro mesa) + math. Order matters: GLESv2 before its deps.
 LIBS := -lEGL -lGLESv2 -lglapi -ldrm_nouveau -lstdc++ -lnx -lm
 
-OBJS := switch_main.o controller.o dvd_switch.o sys_switch.o gfx_switch.o gx_gl.o jmp_switch.o projection_override/projection_override.o \
+OBJS := switch_main.o controller.o dvd_switch.o sys_switch.o gfx_switch.o gx_gl.o hsf_switch.o jmp_switch.o projection_override/projection_override.o \
         ../../game/sprman.o ../../game/sprput.o \
         ../../game/hsfman.o ../../game/pad.o ../../game/main.o ../../game/memory.o ../../game/malloc.o ../../game/process.o \
         ../../game/objdll.o ../../game/objmain.o ../../REL/bootDll/main.o ../../REL/bootDll/language.o \
@@ -38,6 +38,8 @@ marioparty4_switch.elf: $(OBJS)
 # The GX->GL layer and the sprite manager need TARGET_PC so GX immediate-mode /
 # texture calls compile as real functions instead of GameCube FIFO writes.
 gx_gl.o: gx_gl.c
+	"$(CC)" $(CFLAGS) -DTARGET_PC -c "$<" -o "$@"
+hsf_switch.o: hsf_switch.c
 	"$(CC)" $(CFLAGS) -DTARGET_PC -c "$<" -o "$@"
 ../../game/sprman.o: ../../game/sprman.c
 	"$(CC)" $(CFLAGS) -DTARGET_PC -c "$<" -o "$@"

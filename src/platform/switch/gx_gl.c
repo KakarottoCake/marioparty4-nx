@@ -56,6 +56,115 @@ void PSMTXRotAxisRad(Mtx m, const Vec* axis, float rad) {
     m[2][0] = t*x*z - s*y; m[2][1] = t*y*z + s*x; m[2][2] = t*z*z + c;   m[2][3] = 0;
 }
 
+void mtxRot(Mtx m, float x, float y, float z) {
+    Vec axis;
+    Mtx turn;
+    const float radians = 0.017453292519943295f;
+    PSMTXIdentity(m);
+    if (x != 0.0f) {
+        axis.x = 1.0f; axis.y = 0.0f; axis.z = 0.0f;
+        PSMTXRotAxisRad(turn, &axis, x * radians);
+        PSMTXConcat(turn, m, m);
+    }
+    if (y != 0.0f) {
+        axis.x = 0.0f; axis.y = 1.0f; axis.z = 0.0f;
+        PSMTXRotAxisRad(turn, &axis, y * radians);
+        PSMTXConcat(turn, m, m);
+    }
+    if (z != 0.0f) {
+        axis.x = 0.0f; axis.y = 0.0f; axis.z = 1.0f;
+        PSMTXRotAxisRad(turn, &axis, z * radians);
+        PSMTXConcat(turn, m, m);
+    }
+}
+
+void mtxRotCat(Mtx m, float x, float y, float z) {
+    Mtx turn;
+    mtxRot(turn, x, y, z);
+    PSMTXConcat(turn, m, m);
+}
+
+void mtxScaleCat(Mtx m, float x, float y, float z) {
+    m[0][0] *= x; m[1][0] *= x; m[2][0] *= x;
+    m[0][1] *= y; m[1][1] *= y; m[2][1] *= y;
+    m[0][2] *= z; m[1][2] *= z; m[2][2] *= z;
+}
+
+void C_MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp,
+                 const Point3d* target) {
+    float fx = target->x - camPos->x;
+    float fy = target->y - camPos->y;
+    float fz = target->z - camPos->z;
+    float fl = sqrtf(fx * fx + fy * fy + fz * fz);
+    float rx, ry, rz;
+    float rl;
+    float ux, uy, uz;
+
+    if (fl < 0.000001f) {
+        fx = 0.0f; fy = 0.0f; fz = -1.0f;
+        fl = 1.0f;
+    }
+    fx /= fl; fy /= fl; fz /= fl;
+    rx = camUp->y * fz - camUp->z * fy;
+    ry = camUp->z * fx - camUp->x * fz;
+    rz = camUp->x * fy - camUp->y * fx;
+    rl = sqrtf(rx * rx + ry * ry + rz * rz);
+    if (rl < 0.000001f) {
+        rx = 1.0f; ry = 0.0f; rz = 0.0f;
+        rl = 1.0f;
+    }
+    rx /= rl; ry /= rl; rz /= rl;
+    ux = fy * rz - fz * ry;
+    uy = fz * rx - fx * rz;
+    uz = fx * ry - fy * rx;
+    m[0][0] = rx; m[0][1] = ry; m[0][2] = rz;
+    m[1][0] = ux; m[1][1] = uy; m[1][2] = uz;
+    m[2][0] = -fx; m[2][1] = -fy; m[2][2] = -fz;
+    m[0][3] = -(rx * camPos->x + ry * camPos->y + rz * camPos->z);
+    m[1][3] = -(ux * camPos->x + uy * camPos->y + uz * camPos->z);
+    m[2][3] = fx * camPos->x + fy * camPos->y + fz * camPos->z;
+}
+
+void C_MTXPerspective(Mtx44 m, f32 fovY, f32 aspect, f32 nearZ, f32 farZ) {
+    float cot;
+    float radians = fovY * 0.017453292519943295f;
+    memset(m, 0, sizeof(Mtx44));
+    if (aspect == 0.0f) aspect = 4.0f / 3.0f;
+    if (nearZ <= 0.0f) nearZ = 0.1f;
+    if (farZ <= nearZ) farZ = nearZ + 1.0f;
+    cot = 1.0f / tanf(radians * 0.5f);
+    m[0][0] = cot / aspect;
+    m[1][1] = cot;
+    m[2][2] = farZ / (nearZ - farZ);
+    m[2][3] = (nearZ * farZ) / (nearZ - farZ);
+    m[3][2] = -1.0f;
+}
+
+u32 PSMTXInvXpose(const Mtx src, Mtx dst) {
+    float a = src[0][0], b = src[0][1], c = src[0][2];
+    float d = src[1][0], e = src[1][1], f = src[1][2];
+    float g = src[2][0], h = src[2][1], i = src[2][2];
+    float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (fabsf(det) < 0.000001f) {
+        PSMTXIdentity(dst);
+        return 0;
+    }
+    {
+        float inv = 1.0f / det;
+        dst[0][0] = (e * i - f * h) * inv;
+        dst[0][1] = (d * h - b * i) * inv;
+        dst[0][2] = (b * f - d * e) * inv;
+        dst[1][0] = (g * f - d * i) * inv;
+        dst[1][1] = (a * i - c * g) * inv;
+        dst[1][2] = (c * d - a * f) * inv;
+        dst[2][0] = (d * h - e * g) * inv;
+        dst[2][1] = (b * g - a * h) * inv;
+        dst[2][2] = (a * e - b * d) * inv;
+        dst[0][3] = dst[1][3] = dst[2][3] = 0.0f;
+    }
+    return 1;
+}
+
 // Concatenate a translation onto m (result = Trans(x,y,z) * m): just offset col 3.
 void mtxTransCat(Mtx m, float x, float y, float z) {
     m[0][3] += x; m[1][3] += y; m[2][3] += z;
@@ -451,6 +560,12 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
     s_curTex = GetOrCreateTexture(state);
 }
 
+void GXInvalidateTexAll(void) {
+    /* The first HSF renderer is solid-material only.  Clearing this state
+     * prevents the last sprite texture from tinting a 3D mesh. */
+    s_curTex = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Immediate-mode vertex capture
 // ---------------------------------------------------------------------------
@@ -505,7 +620,15 @@ void GXEnd(void) {
                 n++;
             }
         }
-    } else {  // treat as triangle strip/fan-ish fallback: fan from vertex 0
+    } else if (s_prim == GX_TRIANGLES) {
+        for (int q = 0; q + 2 < s_vCount; q += 3) {
+            for (int k = 0; k < 3; k++) {
+                clip[n*2+0] = s_vClip[q+k][0]; clip[n*2+1] = s_vClip[q+k][1];
+                uv[n*2+0] = s_vUV[q+k][0];     uv[n*2+1] = s_vUV[q+k][1];
+                n++;
+            }
+        }
+    } else {  // treat triangle strips/fans as a fan from vertex 0
         for (int j = 1; j + 1 < s_vCount; j++) {
             int idx[3] = { 0, j, j+1 };
             for (int k = 0; k < 3; k++) {
@@ -515,7 +638,13 @@ void GXEnd(void) {
             }
         }
     }
-    Gfx2D_DrawTexTris(clip, uv, n, s_curTex, s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+    if (s_curTex) {
+        Gfx2D_DrawTexTris(clip, uv, n, s_curTex,
+                          s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+    } else {
+        Gfx2D_DrawSolidTris(clip, n,
+                            s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+    }
     s_vCount = 0;
 }
 
