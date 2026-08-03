@@ -30,6 +30,8 @@ extern void GXSet3DMode(u8 enable);
 #define SWITCH_HSF_ATTRIBUTE_SIZE 0x84
 #define SWITCH_HSF_BITMAP_SIZE 0x20
 #define SWITCH_HSF_PALETTE_SIZE 0x10
+#define SWITCH_HSF_MOTION_SIZE 0x10
+#define SWITCH_HSF_TRACK_SIZE 0x10
 #define SWITCH_HSF_BUFFER_SIZE 12
 #define SWITCH_HSF_MAX_DEPTH 128
 
@@ -88,6 +90,7 @@ typedef struct SwitchHsfContext_s {
     HSFATTRIBUTE *attribute;
     HSFBITMAP *bitmap;
     HSFPALETTE *palette;
+    HSFMOTION *motion;
 } SwitchHsfContext;
 
 static u16 SwitchHsfBE16(const u8 *p) {
@@ -907,6 +910,123 @@ static HSFOBJECT *SwitchHsfParseObjects(SwitchHsfContext *ctx, HSFDATA *model) {
     return objects;
 }
 
+/*
+ * Motion records use the same 16-byte PPC layout as HSFTRACK.  The file
+ * stores one motion record followed by its tracks and curve data.  Only the
+ * transform tracks are copied here; envelope, cluster, material, and bitmap
+ * animation still need their own validated native representations.
+ */
+static HSFMOTION *SwitchHsfParseMotion(SwitchHsfContext *ctx) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_MOTION];
+    const u8 *rawMotion;
+    HSFMOTION *motion;
+    HSFTRACK *tracks;
+    u32 trackBase;
+    u32 dataBase;
+    u32 trackCount;
+    u32 i;
+
+    if (section->count == 0) {
+        return NULL;
+    }
+    if (section->count != 1 ||
+        !SwitchHsfTableRange(ctx, SWITCH_HSF_MOTION, SWITCH_HSF_MOTION_SIZE)) {
+        OSReport("HSF Switch: motion table variant skipped\n");
+        return NULL;
+    }
+    rawMotion = ctx->raw + section->ofs;
+    trackCount = SwitchHsfBE32(rawMotion + 4);
+    if (!SwitchHsfCountOK(trackCount) ||
+        trackCount > 0xFFFFFFFFU / SWITCH_HSF_TRACK_SIZE ||
+        section->ofs > 0xFFFFFFFFU - SWITCH_HSF_MOTION_SIZE) {
+        return NULL;
+    }
+    trackBase = section->ofs + SWITCH_HSF_MOTION_SIZE;
+    if (!SwitchHsfRange(ctx, trackBase,
+                        trackCount * SWITCH_HSF_TRACK_SIZE) ||
+        trackBase > 0xFFFFFFFFU - trackCount * SWITCH_HSF_TRACK_SIZE) {
+        return NULL;
+    }
+    dataBase = trackBase + trackCount * SWITCH_HSF_TRACK_SIZE;
+    if (!SwitchHsfRange(ctx, dataBase, 0)) {
+        return NULL;
+    }
+
+    motion = (HSFMOTION *)SwitchHsfArenaAlloc(&ctx->arena, sizeof(*motion));
+    tracks = (HSFTRACK *)SwitchHsfArenaAlloc(
+        &ctx->arena, trackCount * sizeof(*tracks));
+    if (!motion || (trackCount != 0 && !tracks)) {
+        return NULL;
+    }
+    motion->name = ctx->strings;
+    motion->numTracks = (s32)trackCount;
+    motion->track = tracks;
+    motion->maxTime = SwitchHsfF32(rawMotion + 12);
+
+    for (i = 0; i < trackCount; i++) {
+        const u8 *raw = ctx->raw + trackBase + i * SWITCH_HSF_TRACK_SIZE;
+        HSFTRACK *track = &tracks[i];
+        u32 curve = SwitchHsfBE16(raw + 8);
+        u32 keyframes = SwitchHsfBE16(raw + 10);
+        u32 dataOfs = SwitchHsfBE32(raw + 12);
+        u32 valueCount;
+        u32 j;
+
+        memset(track, 0, sizeof(*track));
+        track->type = raw[0];
+        track->start = raw[1];
+        track->target = SwitchHsfBE16(raw + 2);
+        track->clusterWeight = SwitchHsfS32(raw + 4);
+        track->curveType = (u16)curve;
+        track->numKeyframes = (u16)keyframes;
+        if (ctx->stringSize == 0 || track->target >= ctx->stringSize) {
+            track->target = 0xFFFF;
+        }
+
+        if (track->type == HSF_TRACK_TRANSFORM) {
+            track->channel = SwitchHsfBE16(raw + 6);
+        } else if (track->type == HSF_TRACK_MORPH) {
+            track->morphWeight = SwitchHsfS16(raw + 6);
+        } else {
+            track->attrIdx = SwitchHsfS16(raw + 4);
+        }
+
+        if (curve == HSF_CURVE_CONST) {
+            track->value = SwitchHsfF32(raw + 12);
+            continue;
+        }
+        if (track->type != HSF_TRACK_TRANSFORM ||
+            (curve != HSF_CURVE_STEP && curve != HSF_CURVE_LINEAR &&
+             curve != HSF_CURVE_BEZIER) || keyframes == 0) {
+            continue;
+        }
+        valueCount = keyframes * (curve == HSF_CURVE_BEZIER ? 4U : 2U);
+        if (valueCount > 0x3FFFFFFFU / sizeof(float) ||
+            dataOfs > ctx->rawSize - dataBase ||
+            !SwitchHsfRange(ctx, dataBase + dataOfs,
+                            valueCount * sizeof(float))) {
+            return NULL;
+        }
+        track->data = SwitchHsfArenaAlloc(&ctx->arena,
+                                          valueCount * sizeof(float));
+        if (!track->data) {
+            return NULL;
+        }
+        for (j = 0; j < valueCount; j++) {
+            ((float *)track->data)[j] = SwitchHsfF32(
+                ctx->raw + dataBase + dataOfs + j * sizeof(float));
+        }
+    }
+    return motion;
+}
+
+const char *SwitchHsfMotionTargetName(const HSFMOTION *motion, u16 offset) {
+    if (!motion || !motion->name || offset == 0xFFFF) {
+        return NULL;
+    }
+    return motion->name + offset;
+}
+
 static u32 SwitchHsfRawSize(void *data) {
     uintptr_t address = (uintptr_t)data;
     s32 i;
@@ -1148,6 +1268,62 @@ static BOOL SwitchHsfEstimateFaces(const SwitchHsfContext *ctx, u32 *total) {
     return TRUE;
 }
 
+static BOOL SwitchHsfEstimateMotion(const SwitchHsfContext *ctx, u32 *total) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_MOTION];
+    const u8 *rawMotion;
+    u32 trackCount;
+    u32 trackBase;
+    u32 dataBase;
+    u32 i;
+
+    if (section->count == 0) {
+        return TRUE;
+    }
+    if (section->count != 1 ||
+        !SwitchHsfTableRange(ctx, SWITCH_HSF_MOTION, SWITCH_HSF_MOTION_SIZE)) {
+        return FALSE;
+    }
+    rawMotion = ctx->raw + section->ofs;
+    trackCount = SwitchHsfBE32(rawMotion + 4);
+    if (!SwitchHsfCountOK(trackCount) ||
+        !SwitchHsfEstimateAdd(total, 1, sizeof(HSFMOTION)) ||
+        !SwitchHsfEstimateAdd(total, trackCount, sizeof(HSFTRACK)) ||
+        trackCount > 0xFFFFFFFFU / SWITCH_HSF_TRACK_SIZE) {
+        return FALSE;
+    }
+    trackBase = section->ofs + SWITCH_HSF_MOTION_SIZE;
+    if (!SwitchHsfRange(ctx, trackBase,
+                        trackCount * SWITCH_HSF_TRACK_SIZE)) {
+        return FALSE;
+    }
+    dataBase = trackBase + trackCount * SWITCH_HSF_TRACK_SIZE;
+    if (!SwitchHsfRange(ctx, dataBase, 0)) {
+        return FALSE;
+    }
+    for (i = 0; i < trackCount; i++) {
+        const u8 *raw = ctx->raw + trackBase + i * SWITCH_HSF_TRACK_SIZE;
+        u32 curve = SwitchHsfBE16(raw + 8);
+        u32 keyframes = SwitchHsfBE16(raw + 10);
+        u32 dataOfs = SwitchHsfBE32(raw + 12);
+        u32 valueCount;
+        if (raw[0] != HSF_TRACK_TRANSFORM ||
+            curve == HSF_CURVE_CONST || keyframes == 0 ||
+            (curve != HSF_CURVE_STEP && curve != HSF_CURVE_LINEAR &&
+             curve != HSF_CURVE_BEZIER)) {
+            continue;
+        }
+        valueCount = keyframes * (curve == HSF_CURVE_BEZIER ? 4U : 2U);
+        if (valueCount > 0x3FFFFFFFU / sizeof(float) ||
+            dataOfs > ctx->rawSize - dataBase ||
+            !SwitchHsfRange(ctx, dataBase + dataOfs,
+                            valueCount * sizeof(float)) ||
+            !SwitchHsfEstimateAdd(total, valueCount, sizeof(float))) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL SwitchHsfEstimateArena(const SwitchHsfContext *ctx, u32 *total) {
     const SwitchHsfSection *objectSection = &ctx->header.section[SWITCH_HSF_OBJECT];
     u32 i;
@@ -1164,6 +1340,7 @@ static BOOL SwitchHsfEstimateArena(const SwitchHsfContext *ctx, u32 *total) {
                                sizeof(HSFATTRIBUTE)) ||
         !SwitchHsfEstimatePalettes(ctx, total) ||
         !SwitchHsfEstimateBitmaps(ctx, total) ||
+        !SwitchHsfEstimateMotion(ctx, total) ||
         !SwitchHsfEstimateBuffers(ctx, SWITCH_HSF_VERTEX, 12, total) ||
         !SwitchHsfEstimateNormals(ctx, total) ||
         !SwitchHsfEstimateBuffers(ctx, SWITCH_HSF_ST, 8, total) ||
@@ -1310,15 +1487,17 @@ void *LoadHSF(void *data) {
     model->partNum = 0;
     model->shapeNum = 0;
     model->mapAttrNum = 0;
-    model->motionNum = 0;
+    ctx.motion = SwitchHsfParseMotion(&ctx);
+    model->motion = ctx.motion;
+    model->motionNum = ctx.motion ? (s16)ctx.motion->numTracks : 0;
     model->matrixNum = 0;
     model->object = SwitchHsfParseObjects(&ctx, model);
     if (ctx.header.section[SWITCH_HSF_OBJECT].count && !model->object) {
         goto fail;
     }
 
-    OSReport("HSF Switch: static model objects=%d arena=%u/%u\n",
-             model->objectNum, ctx.arena.used, arenaSize);
+    OSReport("HSF Switch: model objects=%d motionTracks=%d arena=%u/%u\n",
+             model->objectNum, model->motionNum, ctx.arena.used, arenaSize);
     SwitchModelRawFree(data);
     return model;
 

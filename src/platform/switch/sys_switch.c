@@ -35,6 +35,10 @@ void HuSysInit(void* mode) {
     }
     __OSBusClock = (u32)(tick_freq * 4);
     __OSCoreClock = __OSBusClock * 3;
+    // One game tick per rendered frame.  The original init path sets this;
+    // keep it explicit on Switch so motion and sprite timers advance.
+    minimumVcount = 1;
+    minimumVcountf = 1.0f;
     HuMemInitAll();
 }
 void GWInit(void) {}
@@ -113,12 +117,8 @@ void VIWaitForRetrace(void) {
 void msmSysRegularProc(void) {}
 
 // Internal 3D / Graphics engine stubs for hsfman.c
-void Hu3DCameraMotionExec(void) {}
 void Hu3DDrawPost(void) {}
-void Hu3DMotionNext(void) {}
 void Hu3DAnimExec(void) {}
-void Hu3DMotionExec(void) {}
-void Hu3DSubMotionExec(void) {}
 void GXInvalidateVtxCache(void) {}
 void GXWaitDrawDone(void) {}
 void ClusterMotionExec(void) {}
@@ -181,8 +181,6 @@ u32 totalTexCnted = 0;
 u32 totalTexCacheCnt = 0;
 u32 totalTexCacheCnted = 0;
 
-void Hu3DMotionInit(void) {}
-
 // Missing stubs for bootDll
 void HuAudSndGrpSetSet(s32 id) {}
 void HuWinInit(void) {}
@@ -244,18 +242,11 @@ void* GXNtsc480Prog = NULL;
 void VIConfigure(void* mode) {}
 void VIFlush(void) {}
 
-// HSF loading and the basic static draw path live in hsf_switch.c.
-s32 Hu3DMotionModelCreate(void* model) { return 0; }
-float Hu3DMotionMaxTimeGet(s32 id) { return 0.0f; }
-void Hu3DMotionClusterSet(s32 model, s32 motion) {}
-void Hu3DMotionShapeSet(s32 model, s32 motion) {}
+// HSF loading and transform-only motion live in hsf_switch.c and
+// motion_switch.c.  Envelope/cluster/shape animation remains disabled.
 void Hu3DAnimModelKill(s32 model) {}
-void Hu3DMotionKill(s32 motion) {}
 void Hu3DParManAllKill(void) {}
-void Hu3DMotionAllKill(void) {}
 void Hu3DAnimAllKill(void) {}
-
-u8 Hu3DMotion[4096] = {0};
 
 // Vector math functions
 #include <math.h>
