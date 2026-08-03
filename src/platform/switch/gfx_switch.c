@@ -28,6 +28,11 @@ static int s_3dBlendMode = 1;      // GX_BM_BLEND
 static int s_3dBlendSrc = 4;       // GX_BL_SRCALPHA
 static int s_3dBlendDst = 5;       // GX_BL_INVSRCALPHA
 static int s_3dBlendOp = 5;        // GX_LO_NOOP
+static int s_3dAlphaComp0 = 6;     // GX_GEQUAL
+static float s_3dAlphaRef0 = 1.0f / 255.0f;
+static int s_3dAlphaOp = 0;        // GX_AOP_AND
+static int s_3dAlphaComp1 = 6;     // GX_GEQUAL
+static float s_3dAlphaRef1 = 1.0f / 255.0f;
 
 // --- 2D shader pipeline (foundation of the GX->GL translation layer) ---
 static GLuint s_prog2d = 0;
@@ -114,6 +119,9 @@ static GLuint s_prog3d = 0;
 static GLint s_loc3dPos = -1;
 static GLint s_loc3dColor = -1;
 static GLint s_loc3dVertexColor = -1;
+static GLint s_loc3dAlphaComp0 = -1, s_loc3dAlphaRef0 = -1;
+static GLint s_loc3dAlphaOp = -1;
+static GLint s_loc3dAlphaComp1 = -1, s_loc3dAlphaRef1 = -1;
 
 static const char* kVert3D =
     "attribute vec3 aPos;\n"
@@ -124,13 +132,40 @@ static const char* kVert3D =
 static const char* kFrag3D =
     "precision mediump float;\n"
     "uniform vec4 uColor;\n"
+    "uniform int uAlphaComp0;\n"
+    "uniform float uAlphaRef0;\n"
+    "uniform int uAlphaOp;\n"
+    "uniform int uAlphaComp1;\n"
+    "uniform float uAlphaRef1;\n"
     "varying vec4 vColor;\n"
-    "void main() { gl_FragColor = uColor * vColor; }\n";
+    "bool alphaCompare(float value, float ref, int func) {\n"
+    "  if (func == 0) return false;\n"
+    "  if (func == 1) return value < ref;\n"
+    "  if (func == 2) return value == ref;\n"
+    "  if (func == 3) return value <= ref;\n"
+    "  if (func == 4) return value > ref;\n"
+    "  if (func == 5) return value != ref;\n"
+    "  if (func == 6) return value >= ref;\n"
+    "  return true;\n"
+    "}\n"
+    "void main() {\n"
+    "  vec4 color = uColor * vColor;\n"
+    "  bool a0 = alphaCompare(color.a, uAlphaRef0, uAlphaComp0);\n"
+    "  bool a1 = alphaCompare(color.a, uAlphaRef1, uAlphaComp1);\n"
+    "  bool pass = (uAlphaOp == 1) ? (a0 || a1) :\n"
+    "              ((uAlphaOp == 2) ? (a0 != a1) :\n"
+    "              ((uAlphaOp == 3) ? (a0 == a1) : (a0 && a1)));\n"
+    "  if (!pass) discard;\n"
+    "  gl_FragColor = color;\n"
+    "}\n";
 
 static GLuint s_prog3dTex = 0;
 static GLint s_3dTexLocPos = -1, s_3dTexLocUV = -1;
 static GLint s_3dTexLocColor = -1;
 static GLint s_3dTexLocTint = -1, s_3dTexLocSampler = -1;
+static GLint s_3dTexAlphaComp0 = -1, s_3dTexAlphaRef0 = -1;
+static GLint s_3dTexAlphaOp = -1;
+static GLint s_3dTexAlphaComp1 = -1, s_3dTexAlphaRef1 = -1;
 
 static const char* kVert3DTex =
     "attribute vec3 aPos;\n"
@@ -146,7 +181,31 @@ static const char* kFrag3DTex =
     "varying vec4 vColor;\n"
     "uniform sampler2D uTex;\n"
     "uniform vec4 uTint;\n"
-    "void main() { gl_FragColor = texture2D(uTex, vUV) * uTint * vColor; }\n";
+    "uniform int uAlphaComp0;\n"
+    "uniform float uAlphaRef0;\n"
+    "uniform int uAlphaOp;\n"
+    "uniform int uAlphaComp1;\n"
+    "uniform float uAlphaRef1;\n"
+    "bool alphaCompare(float value, float ref, int func) {\n"
+    "  if (func == 0) return false;\n"
+    "  if (func == 1) return value < ref;\n"
+    "  if (func == 2) return value == ref;\n"
+    "  if (func == 3) return value <= ref;\n"
+    "  if (func == 4) return value > ref;\n"
+    "  if (func == 5) return value != ref;\n"
+    "  if (func == 6) return value >= ref;\n"
+    "  return true;\n"
+    "}\n"
+    "void main() {\n"
+    "  vec4 color = texture2D(uTex, vUV) * uTint * vColor;\n"
+    "  bool a0 = alphaCompare(color.a, uAlphaRef0, uAlphaComp0);\n"
+    "  bool a1 = alphaCompare(color.a, uAlphaRef1, uAlphaComp1);\n"
+    "  bool pass = (uAlphaOp == 1) ? (a0 || a1) :\n"
+    "              ((uAlphaOp == 2) ? (a0 != a1) :\n"
+    "              ((uAlphaOp == 3) ? (a0 == a1) : (a0 && a1)));\n"
+    "  if (!pass) discard;\n"
+    "  gl_FragColor = color;\n"
+    "}\n";
 
 static GLuint CompileShader(GLenum type, const char* src) {
     GLuint sh = glCreateShader(type);
@@ -213,6 +272,11 @@ static void GfxInit3D(void) {
     s_loc3dPos = glGetAttribLocation(s_prog3d, "aPos");
     s_loc3dColor = glGetUniformLocation(s_prog3d, "uColor");
     s_loc3dVertexColor = glGetAttribLocation(s_prog3d, "aColor");
+    s_loc3dAlphaComp0 = glGetUniformLocation(s_prog3d, "uAlphaComp0");
+    s_loc3dAlphaRef0 = glGetUniformLocation(s_prog3d, "uAlphaRef0");
+    s_loc3dAlphaOp = glGetUniformLocation(s_prog3d, "uAlphaOp");
+    s_loc3dAlphaComp1 = glGetUniformLocation(s_prog3d, "uAlphaComp1");
+    s_loc3dAlphaRef1 = glGetUniformLocation(s_prog3d, "uAlphaRef1");
     OSReport("Gfx: solid 3D pipeline ready\n");
 }
 
@@ -374,18 +438,28 @@ static void GfxInit3DTex(void) {
     s_3dTexLocColor = glGetAttribLocation(s_prog3dTex, "aColor");
     s_3dTexLocTint = glGetUniformLocation(s_prog3dTex, "uTint");
     s_3dTexLocSampler = glGetUniformLocation(s_prog3dTex, "uTex");
+    s_3dTexAlphaComp0 = glGetUniformLocation(s_prog3dTex, "uAlphaComp0");
+    s_3dTexAlphaRef0 = glGetUniformLocation(s_prog3dTex, "uAlphaRef0");
+    s_3dTexAlphaOp = glGetUniformLocation(s_prog3dTex, "uAlphaOp");
+    s_3dTexAlphaComp1 = glGetUniformLocation(s_prog3dTex, "uAlphaComp1");
+    s_3dTexAlphaRef1 = glGetUniformLocation(s_prog3dTex, "uAlphaRef1");
     OSReport("Gfx: depth-tested textured pipeline ready\n");
 }
 
-unsigned int GfxCreateTexture(int w, int h, const void* rgba) {
+unsigned int GfxCreateTexture(int w, int h, const void* rgba,
+                              int wrapS, int wrapT) {
     GLuint tex = 0;
+    GLint glWrapS = wrapS == 1 ? GL_REPEAT :
+                    (wrapS == 2 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE);
+    GLint glWrapT = wrapT == 1 ? GL_REPEAT :
+                    (wrapT == 2 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE);
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, glWrapS);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, glWrapT);
     return tex;
 }
 
@@ -415,6 +489,15 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
     glDisableVertexAttribArray(s_texLocUV);
 }
 
+static void GfxApplyAlphaUniforms(GLint comp0, GLint ref0, GLint op,
+                                  GLint comp1, GLint ref1) {
+    glUniform1i(comp0, s_3dAlphaComp0);
+    glUniform1f(ref0, s_3dAlphaRef0);
+    glUniform1i(op, s_3dAlphaOp);
+    glUniform1i(comp1, s_3dAlphaComp1);
+    glUniform1f(ref1, s_3dAlphaRef1);
+}
+
 void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
                        const float* color, int count, unsigned int tex,
                        float r, float g, float b, float a) {
@@ -425,6 +508,9 @@ void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glUniform1i(s_3dTexLocSampler, 0);
     glUniform4f(s_3dTexLocTint, r, g, b, a);
+    GfxApplyAlphaUniforms(s_3dTexAlphaComp0, s_3dTexAlphaRef0,
+                          s_3dTexAlphaOp, s_3dTexAlphaComp1,
+                          s_3dTexAlphaRef1);
     glEnableVertexAttribArray(s_3dTexLocPos);
     glVertexAttribPointer(s_3dTexLocPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
     glEnableVertexAttribArray(s_3dTexLocUV);
@@ -457,6 +543,9 @@ void Gfx3D_DrawSolidTris(const float* clipXYZ, const float* color, int count,
     glUseProgram(s_prog3d);
     GfxApply3DState();
     glUniform4f(s_loc3dColor, r, g, b, a);
+    GfxApplyAlphaUniforms(s_loc3dAlphaComp0, s_loc3dAlphaRef0,
+                          s_loc3dAlphaOp, s_loc3dAlphaComp1,
+                          s_loc3dAlphaRef1);
     glEnableVertexAttribArray(s_loc3dPos);
     glVertexAttribPointer(s_loc3dPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
     glEnableVertexAttribArray(s_loc3dVertexColor);
@@ -482,6 +571,15 @@ void Gfx3D_SetBlendMode(int mode, int src, int dst, int op) {
     s_3dBlendDst = dst;
     s_3dBlendOp = op;
     (void)s_3dBlendOp;
+}
+
+void Gfx3D_SetAlphaCompare(int comp0, int ref0, int op,
+                           int comp1, int ref1) {
+    s_3dAlphaComp0 = comp0;
+    s_3dAlphaRef0 = (float)ref0 / 255.0f;
+    s_3dAlphaOp = op;
+    s_3dAlphaComp1 = comp1;
+    s_3dAlphaRef1 = (float)ref1 / 255.0f;
 }
 
 void GfxDebugDrawTest(void) {

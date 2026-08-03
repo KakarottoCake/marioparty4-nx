@@ -1427,33 +1427,41 @@ static void SwitchHsfSetMaterial(const HSFOBJECT *object, s16 matIndex,
     GXSetChanMatColor(GX_COLOR0A0, color);
 }
 
-static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
-                                s16 materialCount) {
-    GXTexObj texObj;
-    GXTlutObj tlutObj;
-    HSFMATERIAL *material;
-    HSFATTRIBUTE *attribute;
-    HSFBITMAP *bitmap;
-    GXTlutFmt tlutFormat;
-    GXCITexFmt ciFormat;
+static const HSFATTRIBUTE *SwitchHsfMaterialAttribute(
+    const HSFOBJECT *object, s16 matIndex, s16 materialCount) {
+    const HSFMATERIAL *material;
     u32 attrIndex;
-    BOOL indexed = FALSE;
-
-    GXInvalidateTexAll();
     if (!object || !object->mesh.material || !object->mesh.attribute ||
         matIndex < 0 || matIndex >= materialCount || matIndex >= 0x1000) {
-        return;
+        return NULL;
     }
     material = &object->mesh.material[matIndex];
     if (material->attrNum == 0 || !material->attr ||
         material->attr[0] < 0) {
-        return;
+        return NULL;
     }
     attrIndex = (u32)material->attr[0];
     if (attrIndex >= 0x1000) {
+        return NULL;
+    }
+    return &object->mesh.attribute[attrIndex];
+}
+
+static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
+                                s16 materialCount) {
+    GXTexObj texObj;
+    GXTlutObj tlutObj;
+    const HSFATTRIBUTE *attribute;
+    HSFBITMAP *bitmap;
+    GXTlutFmt tlutFormat;
+    GXCITexFmt ciFormat;
+    BOOL indexed = FALSE;
+
+    GXInvalidateTexAll();
+    attribute = SwitchHsfMaterialAttribute(object, matIndex, materialCount);
+    if (!attribute) {
         return;
     }
-    attribute = &object->mesh.attribute[attrIndex];
     bitmap = attribute->bitmap;
     if (!bitmap || !bitmap->data || bitmap->sizeX <= 0 || bitmap->sizeY <= 0) {
         return;
@@ -1533,7 +1541,8 @@ static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
 }
 
 static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index,
-                               BOOL useVertexColor) {
+                               BOOL useVertexColor,
+                               const HSFATTRIBUTE *attribute) {
     s32 vertexIndex = index[0];
     if (!object->mesh.vertex || vertexIndex < 0 ||
         vertexIndex >= object->mesh.vertex->count) {
@@ -1554,13 +1563,27 @@ static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index,
     if (object->mesh.st && object->mesh.st->data &&
         index[3] >= 0 && index[3] < object->mesh.st->count) {
         const HuVec2f *st = (const HuVec2f *)object->mesh.st->data;
-        GXTexCoord2f32(st[index[3]].x, st[index[3]].y);
+        float u = st[index[3]].x;
+        float v = st[index[3]].y;
+        if (attribute) {
+            if (attribute->scale.x != 0.0f) {
+                u /= attribute->scale.x;
+            }
+            if (attribute->scale.y != 0.0f) {
+                v /= attribute->scale.y;
+            }
+            u -= attribute->trans.x;
+            v -= attribute->trans.y;
+        }
+        GXTexCoord2f32(u, v);
     }
 }
 
 static void SwitchHsfEmitVertex(const HSFOBJECT *object, const HSFFACE *face,
-                                s32 corner, BOOL useVertexColor) {
-    SwitchHsfEmitIndex(object, face->indices[corner], useVertexColor);
+                                s32 corner, BOOL useVertexColor,
+                                const HSFATTRIBUTE *attribute) {
+    SwitchHsfEmitIndex(object, face->indices[corner], useVertexColor,
+                       attribute);
 }
 
 static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount,
@@ -1571,6 +1594,7 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount,
     s32 currentType = -1;
     s16 currentMat = -1;
     BOOL useVertexColor = FALSE;
+    const HSFATTRIBUTE *textureAttribute = NULL;
     s32 vertices = 0;
     BOOL open = FALSE;
 
@@ -1611,6 +1635,8 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount,
             SwitchHsfSetMaterial(object, currentMat & 0x0FFF, materialCount,
                                  modelAttr);
             SwitchHsfSetTexture(object, currentMat & 0x0FFF, materialCount);
+            textureAttribute = SwitchHsfMaterialAttribute(
+                object, currentMat & 0x0FFF, materialCount);
             useVertexColor = FALSE;
             if (object->mesh.material && currentMat >= 0 &&
                 (currentMat & 0x0FFF) < materialCount &&
@@ -1628,15 +1654,16 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount,
             s16 *strip = face->strip.data;
             for (corner = 0; corner < 3; corner++) {
                 SwitchHsfEmitVertex(object, face, firstCorner[corner],
-                                    useVertexColor);
+                                    useVertexColor, textureAttribute);
             }
             for (corner = 0; corner < face->strip.count; corner++) {
                 SwitchHsfEmitIndex(object, strip + corner * 4,
-                                   useVertexColor);
+                                   useVertexColor, textureAttribute);
             }
         } else {
             for (corner = 0; corner < needed; corner++) {
-                SwitchHsfEmitVertex(object, face, corner, useVertexColor);
+                SwitchHsfEmitVertex(object, face, corner, useVertexColor,
+                                    textureAttribute);
             }
         }
         vertices += needed;
