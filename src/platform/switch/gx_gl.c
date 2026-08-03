@@ -248,6 +248,40 @@ static unsigned int s_texMaps[8];   // Aurora-style per-map texture bindings
 static float s_tint[4] = {1, 1, 1, 1};
 static GXBool s_useMaterialTint = TRUE;
 
+/*
+ * Small CPU-side representation of the GX lighting state.  GLES2 still
+ * receives the final color as a vertex attribute, but keeping the decoded
+ * light/channel state here makes the old GX calls useful instead of silently
+ * dropping all normals and lights.
+ */
+#define SWITCH_GX_LIGHT_MAX 8
+#define SWITCH_GX_LIGHT_OBJECT_MAX 64
+typedef struct SwitchGXLightRaw_s {
+    u32 reserved[3];
+    u32 color;
+    float a[3];
+    float k[3];
+    float lpos[3];
+    float ldir[3];
+} SwitchGXLightRaw;
+
+typedef struct SwitchGXChannelState_s {
+    GXBool enable;
+    GXColorSrc ambSrc;
+    GXColorSrc matSrc;
+    u32 lightMask;
+    GXDiffuseFn diffFn;
+    GXAttnFn attnFn;
+} SwitchGXChannelState;
+
+static SwitchGXLightRaw s_lights[SWITCH_GX_LIGHT_MAX];
+static GXLightObj* s_lightObjectKeys[SWITCH_GX_LIGHT_OBJECT_MAX];
+static int s_lightObjectCount;
+static SwitchGXChannelState s_chanState[2];
+static GXColor s_chanAmb[2] = {{0, 0, 0, 255}, {0, 0, 0, 255}};
+static GXColor s_chanMat[2] = {{255, 255, 255, 255}, {255, 255, 255, 255}};
+static u8 s_numChans;
+
 // GX TEV state.  The original hardware stores this in BP registers; Aurora
 // keeps an equivalent decoded state and generates shader code from it.  The
 // Switch path keeps the decoded values in a compact GLES2-friendly snapshot.
@@ -644,11 +678,143 @@ void GXInvalidateTexAll(void) {
 static float s_vClip[MAXV][3];
 static float s_vUV[MAXV][2];
 static float s_vColor[MAXV][4];
+static float s_vLighting[MAXV][4];
 static float s_curVertexColor[4] = {1, 1, 1, 1};
 static float s_curNormal[3] = {0, 0, 1};
 static int s_vCount = 0;
 static int s_prim = 0;
 static BOOL s_3dMode = FALSE;
+
+static void SwitchNormalize3(float *x, float *y, float *z) {
+    float length = sqrtf((*x) * (*x) + (*y) * (*y) + (*z) * (*z));
+    if (length > 0.000001f) {
+        *x /= length;
+        *y /= length;
+        *z /= length;
+    } else {
+        *x = 0.0f;
+        *y = 0.0f;
+        *z = 1.0f;
+    }
+}
+
+static int SwitchLightBitIndex(u32 light) {
+    int i;
+    for (i = 0; i < SWITCH_GX_LIGHT_MAX; i++) {
+        if (light == (1U << i)) return i;
+    }
+    return -1;
+}
+
+static float SwitchLightColor(u32 packed, int shift) {
+    return (float)((packed >> shift) & 0xFFU) / 255.0f;
+}
+
+static void SwitchComputeLighting(float x, float y, float z, float out[4]) {
+    const SwitchGXChannelState *channel = &s_chanState[0];
+    float nx = s_pos[0][0] * s_curNormal[0] +
+               s_pos[0][1] * s_curNormal[1] +
+               s_pos[0][2] * s_curNormal[2];
+    float ny = s_pos[1][0] * s_curNormal[0] +
+               s_pos[1][1] * s_curNormal[1] +
+               s_pos[1][2] * s_curNormal[2];
+    float nz = s_pos[2][0] * s_curNormal[0] +
+               s_pos[2][1] * s_curNormal[1] +
+               s_pos[2][2] * s_curNormal[2];
+    float r;
+    float g;
+    float b;
+    int i;
+
+    out[0] = 1.0f;
+    out[1] = 1.0f;
+    out[2] = 1.0f;
+    out[3] = 1.0f;
+    if (!channel->enable) return;
+
+    SwitchNormalize3(&nx, &ny, &nz);
+    r = channel->ambSrc == GX_SRC_REG ? s_chanAmb[0].r / 255.0f : 1.0f;
+    g = channel->ambSrc == GX_SRC_REG ? s_chanAmb[0].g / 255.0f : 1.0f;
+    b = channel->ambSrc == GX_SRC_REG ? s_chanAmb[0].b / 255.0f : 1.0f;
+
+    for (i = 0; i < SWITCH_GX_LIGHT_MAX; i++) {
+        const SwitchGXLightRaw *light;
+        float lx;
+        float ly;
+        float lz;
+        float distance;
+        float ndotl;
+        float attenuation = 1.0f;
+        float spot = 1.0f;
+        float denom;
+        float contribution;
+        BOOL directional;
+
+        if ((channel->lightMask & (1U << i)) == 0) continue;
+        light = &s_lights[i];
+        directional = fabsf(light->lpos[0]) < 0.0001f &&
+                      fabsf(light->lpos[1]) < 0.0001f &&
+                      fabsf(light->lpos[2]) < 0.0001f &&
+                      (fabsf(light->ldir[0]) > 0.0001f ||
+                       fabsf(light->ldir[1]) > 0.0001f ||
+                       fabsf(light->ldir[2]) > 0.0001f);
+        if (directional) {
+            /* GXInitLightDir stores the negated input direction. */
+            lx = -light->ldir[0];
+            ly = -light->ldir[1];
+            lz = -light->ldir[2];
+            distance = 1.0f;
+        } else {
+            lx = light->lpos[0] - x;
+            ly = light->lpos[1] - y;
+            lz = light->lpos[2] - z;
+            distance = sqrtf(lx * lx + ly * ly + lz * lz);
+            if (distance < 0.0001f) continue;
+            lx /= distance;
+            ly /= distance;
+            lz /= distance;
+        }
+        SwitchNormalize3(&lx, &ly, &lz);
+        ndotl = nx * lx + ny * ly + nz * lz;
+        if (channel->diffFn == GX_DF_SIGN) {
+            ndotl = ndotl * 2.0f - 1.0f;
+        } else {
+            ndotl = ndotl < 0.0f ? 0.0f : ndotl;
+        }
+
+        denom = light->k[0] + light->k[1] * distance +
+                light->k[2] * distance * distance;
+        if (denom > 0.0001f) attenuation = 1.0f / denom;
+        if (channel->attnFn == GX_AF_SPOT) {
+            float spotDot = -(nx * light->ldir[0] +
+                              ny * light->ldir[1] +
+                              nz * light->ldir[2]);
+            spot = light->a[0] + light->a[1] * spotDot +
+                   light->a[2] * spotDot * spotDot;
+            if (spot < 0.0f) spot = 0.0f;
+        }
+        contribution = ndotl * attenuation * spot;
+        if (contribution <= 0.0f) continue;
+        r += SwitchLightColor(light->color, 24) * contribution;
+        g += SwitchLightColor(light->color, 16) * contribution;
+        b += SwitchLightColor(light->color, 8) * contribution;
+    }
+    out[0] = r > 1.0f ? 1.0f : (r < 0.0f ? 0.0f : r);
+    out[1] = g > 1.0f ? 1.0f : (g < 0.0f ? 0.0f : g);
+    out[2] = b > 1.0f ? 1.0f : (b < 0.0f ? 0.0f : b);
+}
+
+static void SwitchApplyVertexColor(int index, float r, float g, float b,
+                                    float a) {
+    s_curVertexColor[0] = r;
+    s_curVertexColor[1] = g;
+    s_curVertexColor[2] = b;
+    s_curVertexColor[3] = a;
+    s_vColor[index][0] = r * s_vLighting[index][0];
+    s_vColor[index][1] = g * s_vLighting[index][1];
+    s_vColor[index][2] = b * s_vLighting[index][2];
+    s_vColor[index][3] = a * s_vLighting[index][3];
+}
 
 void GXSet3DMode(u8 enable) {
     s_3dMode = enable ? TRUE : FALSE;
@@ -712,10 +878,11 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     s_vClip[s_vCount][2] = cz / cw;
     s_vUV[s_vCount][0] = 0.0f;
     s_vUV[s_vCount][1] = 0.0f;
-    s_vColor[s_vCount][0] = s_curVertexColor[0];
-    s_vColor[s_vCount][1] = s_curVertexColor[1];
-    s_vColor[s_vCount][2] = s_curVertexColor[2];
-    s_vColor[s_vCount][3] = s_curVertexColor[3];
+    SwitchComputeLighting(ox, oy, oz, s_vLighting[s_vCount]);
+    s_vColor[s_vCount][0] = s_curVertexColor[0] * s_vLighting[s_vCount][0];
+    s_vColor[s_vCount][1] = s_curVertexColor[1] * s_vLighting[s_vCount][1];
+    s_vColor[s_vCount][2] = s_curVertexColor[2] * s_vLighting[s_vCount][2];
+    s_vColor[s_vCount][3] = s_curVertexColor[3] * s_vLighting[s_vCount][3];
     s_vCount++;
 }
 
@@ -748,14 +915,8 @@ void GXNormal1x8(u8 index) { (void)index; }
 
 void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
     if (s_vCount == 0 || s_vCount > MAXV) return;
-    s_curVertexColor[0] = r / 255.0f;
-    s_curVertexColor[1] = g / 255.0f;
-    s_curVertexColor[2] = b / 255.0f;
-    s_curVertexColor[3] = a / 255.0f;
-    s_vColor[s_vCount - 1][0] = s_curVertexColor[0];
-    s_vColor[s_vCount - 1][1] = s_curVertexColor[1];
-    s_vColor[s_vCount - 1][2] = s_curVertexColor[2];
-    s_vColor[s_vCount - 1][3] = s_curVertexColor[3];
+    SwitchApplyVertexColor(s_vCount - 1, r / 255.0f, g / 255.0f,
+                           b / 255.0f, a / 255.0f);
 }
 
 void GXColor3u8(u8 r, u8 g, u8 b) { GXColor4u8(r, g, b, 255); }
@@ -955,8 +1116,6 @@ static GXCompType s_vtxType[GX_MAX_VTXFMT][GX_VA_MAX_ATTR];
 static u8 s_vtxFrac[GX_MAX_VTXFMT][GX_VA_MAX_ATTR];
 static GXTexGenType s_texGenFunc[GX_MAX_TEXCOORD];
 static GXTexGenSrc s_texGenSrc[GX_MAX_TEXCOORD];
-static GXColor s_chanAmb[2];
-static GXBool s_chanLighting[2];
 
 void GXSetViewport(f32 left, f32 top, f32 width, f32 height,
                    f32 nearZ, f32 farZ) {
@@ -1223,31 +1382,34 @@ void GXSetTexCoordScaleManually(GXTexCoordID coord, u8 enable,
 }
 
 void GXSetNumChans(u8 num) {
-    (void)num;
+    s_numChans = num > 2 ? 2 : num;
 }
 
 void GXSetChanCtrl(GXChannelID chan, GXBool enable, GXColorSrc ambSrc,
                    GXColorSrc matSrc, u32 lightMask, GXDiffuseFn diffFn,
                    GXAttnFn attnFn) {
-    (void)ambSrc;
-    (void)matSrc;
-    (void)lightMask;
-    (void)diffFn;
-    (void)attnFn;
+    int index;
     if (chan == GX_COLOR0 || chan == GX_ALPHA0 || chan == GX_COLOR0A0) {
+        index = 0;
         s_useMaterialTint = matSrc == GX_SRC_REG ? TRUE : FALSE;
-    }
-    if (chan == GX_COLOR0 || chan == GX_ALPHA0 || chan == GX_COLOR0A0) {
-        s_chanLighting[0] = enable;
     } else if (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) {
-        s_chanLighting[1] = enable;
+        index = 1;
+    } else {
+        return;
     }
+    s_chanState[index].enable = enable;
+    s_chanState[index].ambSrc = ambSrc;
+    s_chanState[index].matSrc = matSrc;
+    s_chanState[index].lightMask = lightMask;
+    s_chanState[index].diffFn = diffFn;
+    s_chanState[index].attnFn = attnFn;
 }
 
 void GXSetChanAmbColor(GXChannelID chan, GXColor color) {
     if (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) {
         s_chanAmb[1] = color;
-    } else {
+    } else if (chan == GX_COLOR0 || chan == GX_ALPHA0 ||
+               chan == GX_COLOR0A0) {
         s_chanAmb[0] = color;
     }
 }
@@ -1266,10 +1428,156 @@ void GXSetAlphaUpdate(GXBool enable) {
 
 // Capture the material color as our draw tint (texture is modulated by it).
 void GXSetChanMatColor(GXChannelID id, GXColor c) {
-    (void)id;
-    s_tint[0] = c.r / 255.0f; s_tint[1] = c.g / 255.0f;
-    s_tint[2] = c.b / 255.0f; s_tint[3] = c.a / 255.0f;
+    int index;
+    if (id == GX_COLOR1 || id == GX_ALPHA1 || id == GX_COLOR1A1) {
+        index = 1;
+    } else {
+        index = 0;
+    }
+    s_chanMat[index] = c;
+    if (index == 0) {
+        s_tint[0] = c.r / 255.0f; s_tint[1] = c.g / 255.0f;
+        s_tint[2] = c.b / 255.0f; s_tint[3] = c.a / 255.0f;
+    }
 }
+
+/* GXLight.c writes these fields into the GameCube FIFO.  The Switch build
+ * keeps the same 64-byte object layout, then stores a decoded copy when the
+ * light is loaded. */
+static SwitchGXLightRaw *SwitchLightObject(GXLightObj *object) {
+    int i;
+    if (!object) return NULL;
+    for (i = 0; i < s_lightObjectCount; i++) {
+        if (s_lightObjectKeys[i] == object) return (SwitchGXLightRaw *)object;
+    }
+    if (s_lightObjectCount < SWITCH_GX_LIGHT_OBJECT_MAX) {
+        s_lightObjectKeys[s_lightObjectCount++] = object;
+        memset(object, 0, sizeof(*object));
+        ((SwitchGXLightRaw *)object)->color = 0xFFFFFFFFU;
+        ((SwitchGXLightRaw *)object)->a[0] = 1.0f;
+        ((SwitchGXLightRaw *)object)->k[0] = 1.0f;
+    }
+    return (SwitchGXLightRaw *)object;
+}
+
+void GXInitLightAttn(GXLightObj *object, f32 a0, f32 a1, f32 a2,
+                     f32 k0, f32 k1, f32 k2) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    if (!light) return;
+    light->a[0] = a0; light->a[1] = a1; light->a[2] = a2;
+    light->k[0] = k0; light->k[1] = k1; light->k[2] = k2;
+}
+
+void GXInitLightAttnA(GXLightObj *object, f32 a0, f32 a1, f32 a2) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    if (!light) return;
+    light->a[0] = a0; light->a[1] = a1; light->a[2] = a2;
+}
+
+void GXInitLightAttnK(GXLightObj *object, f32 k0, f32 k1, f32 k2) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    if (!light) return;
+    light->k[0] = k0; light->k[1] = k1; light->k[2] = k2;
+}
+
+void GXInitLightPos(GXLightObj *object, f32 x, f32 y, f32 z) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    if (!light) return;
+    light->lpos[0] = x; light->lpos[1] = y; light->lpos[2] = z;
+    light->ldir[0] = light->ldir[1] = light->ldir[2] = 0.0f;
+}
+
+void GXInitLightDir(GXLightObj *object, f32 nx, f32 ny, f32 nz) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    if (!light) return;
+    light->ldir[0] = -nx; light->ldir[1] = -ny; light->ldir[2] = -nz;
+    light->lpos[0] = light->lpos[1] = light->lpos[2] = 0.0f;
+}
+
+void GXInitLightColor(GXLightObj *object, GXColor color) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    if (!light) return;
+    light->color = ((u32)color.r << 24) | ((u32)color.g << 16) |
+                   ((u32)color.b << 8) | color.a;
+}
+
+void GXInitLightSpot(GXLightObj *object, f32 cutoff, GXSpotFn spotFunc) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    float c;
+    float d;
+    if (!light) return;
+    if (cutoff <= 0.0f || cutoff > 90.0f) spotFunc = GX_SP_OFF;
+    c = cosf((3.1415926535f * cutoff) / 180.0f);
+    switch (spotFunc) {
+        case GX_SP_FLAT:
+            light->a[0] = -1000.0f * c; light->a[1] = 1000.0f; light->a[2] = 0.0f;
+            break;
+        case GX_SP_COS:
+            light->a[0] = -c / (1.0f - c); light->a[1] = 1.0f / (1.0f - c); light->a[2] = 0.0f;
+            break;
+        case GX_SP_COS2:
+            light->a[0] = 0.0f; light->a[1] = -c / (1.0f - c); light->a[2] = 1.0f / (1.0f - c);
+            break;
+        case GX_SP_SHARP:
+            d = (1.0f - c) * (1.0f - c);
+            light->a[0] = c * (c - 2.0f) / d; light->a[1] = 2.0f / d; light->a[2] = -1.0f / d;
+            break;
+        case GX_SP_RING1:
+            d = (1.0f - c) * (1.0f - c);
+            light->a[0] = -4.0f * c / d; light->a[1] = 4.0f * (1.0f + c) / d; light->a[2] = -4.0f / d;
+            break;
+        case GX_SP_RING2:
+            d = (1.0f - c) * (1.0f - c);
+            light->a[0] = 1.0f - 2.0f * c * c / d; light->a[1] = 4.0f * c / d; light->a[2] = -2.0f / d;
+            break;
+        case GX_SP_OFF:
+        default:
+            light->a[0] = 1.0f; light->a[1] = 0.0f; light->a[2] = 0.0f;
+            break;
+    }
+}
+
+void GXInitLightDistAttn(GXLightObj *object, f32 refDistance,
+                         f32 refBrightness, GXDistAttnFn distFunc) {
+    SwitchGXLightRaw *light = SwitchLightObject(object);
+    if (!light) return;
+    if (refDistance < 0.0f || refBrightness <= 0.0f ||
+        refBrightness >= 1.0f) {
+        distFunc = GX_DA_OFF;
+    }
+    switch (distFunc) {
+        case GX_DA_GENTLE:
+            light->k[0] = 1.0f;
+            light->k[1] = (1.0f - refBrightness) /
+                          (refBrightness * refDistance);
+            light->k[2] = 0.0f;
+            break;
+        case GX_DA_MEDIUM:
+            light->k[0] = 1.0f;
+            light->k[1] = 0.5f * (1.0f - refBrightness) /
+                          (refBrightness * refDistance);
+            light->k[2] = 0.5f * (1.0f - refBrightness) /
+                          (refBrightness * refDistance * refDistance);
+            break;
+        case GX_DA_STEEP:
+            light->k[0] = 1.0f; light->k[1] = 0.0f;
+            light->k[2] = (1.0f - refBrightness) /
+                          (refBrightness * refDistance * refDistance);
+            break;
+        case GX_DA_OFF:
+        default:
+            light->k[0] = 1.0f; light->k[1] = 0.0f; light->k[2] = 0.0f;
+            break;
+    }
+}
+
+void GXLoadLightObjImm(GXLightObj *object, GXLightID lightId) {
+    int index = SwitchLightBitIndex((u32)lightId);
+    SwitchGXLightRaw *source = SwitchLightObject(object);
+    if (!source || index < 0) return;
+    memcpy(&s_lights[index], source, sizeof(s_lights[index]));
+}
+
 // Remaining GX state functions are kept as loose no-ops in sys_switch.c.
 
 #endif // __SWITCH__

@@ -41,7 +41,8 @@ What works:
 - Converts big-endian, 32-bit-offset HSF model tables into native structures and
   draws static triangle/quad/strip meshes through the OpenGL path, including HSF
   bitmap/palette textures, depth testing, culling, blend state, transparency,
-  and per-vertex colors.
+  per-vertex colors, packed normals, and a basic CPU-side GX light/channel
+  fallback.
 - Reads HSF skeletons, envelope weights, and transform tracks. Supported object
   animation and guarded skinning advance at one game tick per rendered frame.
   Cluster/shape animation is still off.
@@ -58,10 +59,10 @@ What works:
 What does **not** work yet:
 - Complete visible boot artwork and menus still need validation and cleanup on
   hardware. The 2D path is wired, but it is not a finished renderer.
-- HSF cluster/shape animation, hardware lighting, indirect TEV effects, and
-  complete 3D scene rendering are not finished; no game board or minigame scene
-  is validated yet. The GLES2 TEV path currently supports the first four stages
-  and one selected texture per draw.
+- HSF cluster/shape animation, full hardware-equivalent lighting/specular/fog,
+  indirect TEV effects, and complete 3D scene rendering are not finished; no
+  game board or minigame scene is validated yet. The GLES2 TEV path currently
+  supports the first four stages and one selected texture per draw.
 - No audio or save data yet. Glyph lookup exists, but the original UI has not yet
   been fully wired to replace every on-screen button prompt.
 - Only `bootDll` is wired up; every other overlay currently stub-links and does
@@ -123,7 +124,7 @@ Everything platform-specific lives in `src/platform/switch/`:
 | `switch_main.c` | Entry point. Mounts romfs, inits controllers/DVD, hands the display from the boot console to GL, then calls `game_main`. |
 | `sys_switch.c` | The big "stub layer": minimal/no-op implementations of the GameCube `GX`, `VI`, `OS`, `PAD`, `Hu*` engine calls so the game links. This is where most future work replaces stubs with real behavior. |
 | `gfx_switch.c/.h` | EGL/GLES2 setup, framebuffer clear/present, TEV-aware 2D/3D shader pipelines, viewport/scissor, and GX raster state. |
-| `gx_gl.c` | The `GX → OpenGL` translation layer (compiled with `-DTARGET_PC`): matrix math, immediate-mode vertex/color capture, decoded TEV state, GameCube texture decoding, texture-map bindings, and GX raster-state translation. |
+| `gx_gl.c` | The `GX → OpenGL` translation layer (compiled with `-DTARGET_PC`): matrix math, immediate-mode vertex/normal/color capture, decoded TEV state, basic GX lighting, GameCube texture decoding, texture-map bindings, and GX raster-state translation. |
 | `hsf_switch.c` | Safe big-endian/32-bit-offset HSF conversion, skeleton/envelope skinning, mesh drawing, material state, bitmap/palette texture hookup, and guarded HSF motion-table conversion. |
 | `motion_switch.c` | Transform-track motion storage, curve evaluation, model animation timing, and motion-slot lifetime management. |
 | `dvd_switch.c` | Virtual DVD/FST: scans the asset folder and maps GameCube `DVD*` file calls to real files. Also hosts `OSReport` logging. |
@@ -179,7 +180,7 @@ and the remaining 3D display-list translation layer.
 
 ## Roadmap (rough)
 1. Validate and finish the 2D sprite path on hardware.
-2. Finish HSF animation, hardware lighting, indirect materials, and remaining loaders.
+2. Finish HSF animation, richer lighting/fog, indirect materials, and remaining loaders.
 3. Flesh out the remaining `GX → OpenGL` TEV/display-list behavior for complete 3D scenes.
 4. Audio and save data.
 5. Wire the dynamic glyph lookup through every original UI prompt.
