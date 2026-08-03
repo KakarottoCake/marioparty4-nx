@@ -107,6 +107,14 @@ files from the SD card. You need the extracted MP4 (USA rev0) `files/` folder
 The asset root is auto-detected at startup (`romfs:/files`, then `sdmc:/files`,
 then `files/` relative to the working directory) — see `dvd_switch.c`.
 
+### One-click SD setup
+
+For a prebuilt copy, put `deploy_to_sd.bat` beside the compiled `.nro` and,
+optionally, the extracted `files/` folder. Double-click the batch file, enter the
+SD card drive letter, and confirm it. It creates `SD:/switch/`, copies the NRO,
+and copies the loose game files when they are available. The script never
+downloads or supplies game assets.
+
 ### Logs
 Engine `OSReport` output is routed to (1) the system debug log
 (`svcOutputDebugString`) — visible in Ryujinx and Eden's log window — and (2) a
