@@ -1336,12 +1336,12 @@ void MakeDisplayList(HU3DMODELID modelId, u32 no) {
 
 static void SwitchHsfObjectLocal(const HSFOBJECT *object, Mtx out) {
     PSMTXIdentity(out);
-    mtxRot(out, object->mesh.base.rot.x, object->mesh.base.rot.y,
-           object->mesh.base.rot.z);
-    mtxScaleCat(out, object->mesh.base.scale.x, object->mesh.base.scale.y,
-                object->mesh.base.scale.z);
-    mtxTransCat(out, object->mesh.base.pos.x, object->mesh.base.pos.y,
-                object->mesh.base.pos.z);
+    mtxRot(out, object->mesh.curr.rot.x, object->mesh.curr.rot.y,
+           object->mesh.curr.rot.z);
+    mtxScaleCat(out, object->mesh.curr.scale.x, object->mesh.curr.scale.y,
+                object->mesh.curr.scale.z);
+    mtxTransCat(out, object->mesh.curr.pos.x, object->mesh.curr.pos.y,
+                object->mesh.curr.pos.z);
 }
 
 static void SwitchHsfObjectMatrix(const HSFOBJECT *object, Mtx model, Mtx out) {
@@ -1362,15 +1362,67 @@ static void SwitchHsfObjectMatrix(const HSFOBJECT *object, Mtx model, Mtx out) {
 }
 
 static void SwitchHsfSetMaterial(const HSFOBJECT *object, s16 matIndex,
-                                 s16 materialCount) {
+                                 s16 materialCount, u32 modelAttr) {
     GXColor color = {255, 255, 255, 255};
+    const HSFMATERIAL *material = NULL;
+    u32 flags = object->flags;
     if (object->mesh.material && matIndex >= 0 &&
-        matIndex < materialCount && matIndex < 0x1000 &&
-        object->mesh.material[matIndex].color[0] != 0) {
-        const HSFMATERIAL *material = &object->mesh.material[matIndex];
+        matIndex < materialCount && matIndex < 0x1000) {
+        material = &object->mesh.material[matIndex];
+        flags |= material->flags;
         color.r = material->color[0];
         color.g = material->color[1];
         color.b = material->color[2];
+        if (material->invAlpha > 0.0f) {
+            float alpha = 1.0f - material->invAlpha;
+            if (alpha < 0.0f) alpha = 0.0f;
+            if (alpha > 1.0f) alpha = 1.0f;
+            color.a = (u8)(alpha * 255.0f + 0.5f);
+        }
+    }
+
+    if (modelAttr & HU3D_ATTR_CULL_FRONT) {
+        GXSetCullMode(GX_CULL_FRONT);
+    } else if (flags & HSF_MATERIAL_NOCULL) {
+        GXSetCullMode(GX_CULL_NONE);
+    } else {
+        GXSetCullMode(GX_CULL_BACK);
+    }
+
+    if (modelAttr & HU3D_ATTR_ZCMP_OFF) {
+        GXSetZMode(GX_FALSE, GX_LEQUAL, GX_FALSE);
+    } else {
+        BOOL zWrite = TRUE;
+        if (modelAttr & HU3D_ATTR_ZWRITE_OFF) {
+            zWrite = FALSE;
+        } else if (flags & (HSF_MATERIAL_DISABLE_ZWRITE | HSF_MATERIAL_NEAR)) {
+            zWrite = FALSE;
+        } else if (material && (material->invAlpha != 0.0f ||
+                                (material->pass & 0xF) ||
+                                (flags & (HSF_MATERIAL_ADDCOL |
+                                          HSF_MATERIAL_INVCOL)))) {
+            zWrite = FALSE;
+        }
+        GXSetZMode(GX_TRUE, GX_LEQUAL, zWrite);
+    }
+
+    if (flags & (HSF_MATERIAL_DISABLE_ZWRITE | HSF_MATERIAL_NEAR)) {
+        GXSetAlphaCompare(GX_GEQUAL, 0x80, GX_AOP_OR,
+                          GX_GEQUAL, 0x80);
+    } else {
+        GXSetAlphaCompare(GX_GEQUAL, 1, GX_AOP_AND,
+                          GX_GEQUAL, 1);
+    }
+
+    if (flags & HSF_MATERIAL_ADDCOL) {
+        GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE,
+                       GX_LO_NOOP);
+    } else if (flags & HSF_MATERIAL_INVCOL) {
+        GXSetBlendMode(GX_BM_BLEND, GX_BL_ZERO, GX_BL_INVDSTCLR,
+                       GX_LO_NOOP);
+    } else {
+        GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA,
+                       GX_LO_NOOP);
     }
     GXSetChanMatColor(GX_COLOR0A0, color);
 }
@@ -1480,7 +1532,8 @@ static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
     GXLoadTexObj(&texObj, GX_TEXMAP0);
 }
 
-static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index) {
+static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index,
+                               BOOL useVertexColor) {
     s32 vertexIndex = index[0];
     if (!object->mesh.vertex || vertexIndex < 0 ||
         vertexIndex >= object->mesh.vertex->count) {
@@ -1492,24 +1545,32 @@ static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index) {
         GXPosition3f32(vertex[vertexIndex].x, vertex[vertexIndex].y,
                        vertex[vertexIndex].z);
     }
+    if (useVertexColor && object->mesh.color && object->mesh.color->data &&
+        index[2] >= 0 && index[2] < object->mesh.color->count) {
+        const GXColor *color = (const GXColor *)object->mesh.color->data;
+        GXColor4u8(color[index[2]].r, color[index[2]].g,
+                   color[index[2]].b, color[index[2]].a);
+    }
     if (object->mesh.st && object->mesh.st->data &&
-        index[2] >= 0 && index[2] < object->mesh.st->count) {
+        index[3] >= 0 && index[3] < object->mesh.st->count) {
         const HuVec2f *st = (const HuVec2f *)object->mesh.st->data;
-        GXTexCoord2f32(st[index[2]].x, st[index[2]].y);
+        GXTexCoord2f32(st[index[3]].x, st[index[3]].y);
     }
 }
 
 static void SwitchHsfEmitVertex(const HSFOBJECT *object, const HSFFACE *face,
-                                s32 corner) {
-    SwitchHsfEmitIndex(object, face->indices[corner]);
+                                s32 corner, BOOL useVertexColor) {
+    SwitchHsfEmitIndex(object, face->indices[corner], useVertexColor);
 }
 
-static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount) {
+static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount,
+                                 u32 modelAttr) {
     HSFBUFFER *faceBuffer = object->mesh.face;
     HSFFACE *faces;
     s32 i;
     s32 currentType = -1;
     s16 currentMat = -1;
+    BOOL useVertexColor = FALSE;
     s32 vertices = 0;
     BOOL open = FALSE;
 
@@ -1547,8 +1608,16 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount) {
         if (!open) {
             currentType = type;
             currentMat = face->mat;
-            SwitchHsfSetMaterial(object, currentMat & 0x0FFF, materialCount);
+            SwitchHsfSetMaterial(object, currentMat & 0x0FFF, materialCount,
+                                 modelAttr);
             SwitchHsfSetTexture(object, currentMat & 0x0FFF, materialCount);
+            useVertexColor = FALSE;
+            if (object->mesh.material && currentMat >= 0 &&
+                (currentMat & 0x0FFF) < materialCount &&
+                (currentMat & 0x0FFF) < 0x1000) {
+                useVertexColor =
+                    object->mesh.material[currentMat & 0x0FFF].vtxMode == 5;
+            }
             GXBegin(type == HSF_FACE_QUAD ? GX_QUADS :
                     (type == HSF_FACE_TRISTRIP ? GX_TRIANGLESTRIP : GX_TRIANGLES),
                     GX_VTXFMT0, 0);
@@ -1558,14 +1627,16 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount) {
             static const s32 firstCorner[3] = {0, 2, 1};
             s16 *strip = face->strip.data;
             for (corner = 0; corner < 3; corner++) {
-                SwitchHsfEmitVertex(object, face, firstCorner[corner]);
+                SwitchHsfEmitVertex(object, face, firstCorner[corner],
+                                    useVertexColor);
             }
             for (corner = 0; corner < face->strip.count; corner++) {
-                SwitchHsfEmitIndex(object, strip + corner * 4);
+                SwitchHsfEmitIndex(object, strip + corner * 4,
+                                   useVertexColor);
             }
         } else {
             for (corner = 0; corner < needed; corner++) {
-                SwitchHsfEmitVertex(object, face, corner);
+                SwitchHsfEmitVertex(object, face, corner, useVertexColor);
             }
         }
         vertices += needed;
@@ -1594,7 +1665,7 @@ void Hu3DDraw(HU3DMODEL *modelP, Mtx mtx, Vec *scale) {
         }
         SwitchHsfObjectMatrix(object, mtx, objectMatrix);
         GXLoadPosMtxImm(objectMatrix, 0);
-        SwitchHsfRenderFaces(object, model->materialNum);
+        SwitchHsfRenderFaces(object, model->materialNum, modelP->attr);
     }
     GXSet3DMode(FALSE);
 }

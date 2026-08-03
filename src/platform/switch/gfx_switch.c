@@ -18,6 +18,17 @@ static float s_clearR = 0.0f;
 static float s_clearG = 0.0f;
 static float s_clearB = 0.0f;
 
+// Small GX-compatible state cache for the native 3D path.  These defaults are
+// the normal GameCube material settings used by the original renderer.
+static int s_3dCullMode = 2;       // GX_CULL_BACK
+static int s_3dDepthEnable = 1;
+static int s_3dDepthFunc = 3;      // GX_LEQUAL
+static int s_3dDepthWrite = 1;
+static int s_3dBlendMode = 1;      // GX_BM_BLEND
+static int s_3dBlendSrc = 4;       // GX_BL_SRCALPHA
+static int s_3dBlendDst = 5;       // GX_BL_INVSRCALPHA
+static int s_3dBlendOp = 5;        // GX_LO_NOOP
+
 // --- 2D shader pipeline (foundation of the GX->GL translation layer) ---
 static GLuint s_prog2d = 0;
 static GLint  s_locPos = -1;    // attribute: vertex position (clip space)
@@ -27,6 +38,66 @@ extern void OSReport(const char* msg, ...);  // engine logger (goes to SD log)
 
 static void GfxInitTex(void);  // defined later (textured pipeline)
 static void GfxInit3DTex(void);  // defined later (depth-tested textured path)
+
+static GLenum GfxCompareFunc(int func) {
+    switch (func) {
+        case 0: return GL_NEVER;
+        case 1: return GL_LESS;
+        case 2: return GL_EQUAL;
+        case 3: return GL_LEQUAL;
+        case 4: return GL_GREATER;
+        case 5: return GL_NOTEQUAL;
+        case 6: return GL_GEQUAL;
+        default: return GL_ALWAYS;
+    }
+}
+
+static GLenum GfxBlendFactor(int factor, int destination) {
+    switch (factor) {
+        case 0: return GL_ZERO;
+        case 1: return GL_ONE;
+        case 2: return destination ? GL_DST_COLOR : GL_SRC_COLOR;
+        case 3: return destination ? GL_ONE_MINUS_DST_COLOR : GL_ONE_MINUS_SRC_COLOR;
+        case 4: return GL_SRC_ALPHA;
+        case 5: return GL_ONE_MINUS_SRC_ALPHA;
+        case 6: return GL_DST_ALPHA;
+        case 7: return GL_ONE_MINUS_DST_ALPHA;
+        default: return GL_ONE;
+    }
+}
+
+static void GfxApply3DState(void) {
+    if (s_3dCullMode == 0) {
+        glDisable(GL_CULL_FACE);
+    } else {
+        glEnable(GL_CULL_FACE);
+        if (s_3dCullMode == 1) {
+            glCullFace(GL_FRONT);
+        } else if (s_3dCullMode == 3) {
+            glCullFace(GL_FRONT_AND_BACK);
+        } else {
+            glCullFace(GL_BACK);
+        }
+    }
+
+    if (s_3dDepthEnable) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GfxCompareFunc(s_3dDepthFunc));
+    } else {
+        glDisable(GL_DEPTH_TEST);
+    }
+    glDepthMask(s_3dDepthWrite ? GL_TRUE : GL_FALSE);
+
+    if (s_3dBlendMode == 0) {
+        glDisable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+    } else {
+        glEnable(GL_BLEND);
+        glBlendFunc(GfxBlendFactor(s_3dBlendSrc, 0),
+                    GfxBlendFactor(s_3dBlendDst, 1));
+        glBlendEquation(s_3dBlendMode == 3 ? GL_FUNC_SUBTRACT : GL_FUNC_ADD);
+    }
+}
 
 static const char* kVert2D =
     "attribute vec2 aPos;\n"
@@ -42,32 +113,40 @@ static const char* kFrag2D =
 static GLuint s_prog3d = 0;
 static GLint s_loc3dPos = -1;
 static GLint s_loc3dColor = -1;
+static GLint s_loc3dVertexColor = -1;
 
 static const char* kVert3D =
     "attribute vec3 aPos;\n"
-    "void main() { gl_Position = vec4(aPos, 1.0); }\n";
+    "attribute vec4 aColor;\n"
+    "varying vec4 vColor;\n"
+    "void main() { vColor = aColor; gl_Position = vec4(aPos, 1.0); }\n";
 
 static const char* kFrag3D =
     "precision mediump float;\n"
     "uniform vec4 uColor;\n"
-    "void main() { gl_FragColor = uColor; }\n";
+    "varying vec4 vColor;\n"
+    "void main() { gl_FragColor = uColor * vColor; }\n";
 
 static GLuint s_prog3dTex = 0;
 static GLint s_3dTexLocPos = -1, s_3dTexLocUV = -1;
+static GLint s_3dTexLocColor = -1;
 static GLint s_3dTexLocTint = -1, s_3dTexLocSampler = -1;
 
 static const char* kVert3DTex =
     "attribute vec3 aPos;\n"
     "attribute vec2 aUV;\n"
+    "attribute vec4 aColor;\n"
     "varying vec2 vUV;\n"
-    "void main() { vUV = aUV; gl_Position = vec4(aPos, 1.0); }\n";
+    "varying vec4 vColor;\n"
+    "void main() { vUV = aUV; vColor = aColor; gl_Position = vec4(aPos, 1.0); }\n";
 
 static const char* kFrag3DTex =
     "precision mediump float;\n"
     "varying vec2 vUV;\n"
+    "varying vec4 vColor;\n"
     "uniform sampler2D uTex;\n"
     "uniform vec4 uTint;\n"
-    "void main() { gl_FragColor = texture2D(uTex, vUV) * uTint; }\n";
+    "void main() { gl_FragColor = texture2D(uTex, vUV) * uTint * vColor; }\n";
 
 static GLuint CompileShader(GLenum type, const char* src) {
     GLuint sh = glCreateShader(type);
@@ -118,6 +197,7 @@ static void GfxInit3D(void) {
     glAttachShader(s_prog3d, vs);
     glAttachShader(s_prog3d, fs);
     glBindAttribLocation(s_prog3d, 0, "aPos");
+    glBindAttribLocation(s_prog3d, 1, "aColor");
     glLinkProgram(s_prog3d);
     GLint ok = 0;
     glGetProgramiv(s_prog3d, GL_LINK_STATUS, &ok);
@@ -132,6 +212,7 @@ static void GfxInit3D(void) {
     glDeleteShader(fs);
     s_loc3dPos = glGetAttribLocation(s_prog3d, "aPos");
     s_loc3dColor = glGetUniformLocation(s_prog3d, "uColor");
+    s_loc3dVertexColor = glGetAttribLocation(s_prog3d, "aColor");
     OSReport("Gfx: solid 3D pipeline ready\n");
 }
 
@@ -215,6 +296,7 @@ void Gfx2D_DrawQuad(float x0, float y0, float x1, float y1,
                     float r, float g, float b, float a) {
     if (s_prog2d == 0) return;
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
     float cx0 = ScreenToClipX(x0), cy0 = ScreenToClipY(y0);
     float cx1 = ScreenToClipX(x1), cy1 = ScreenToClipY(y1);
     const GLfloat verts[] = {
@@ -274,6 +356,7 @@ static void GfxInit3DTex(void) {
     glAttachShader(s_prog3dTex, fs);
     glBindAttribLocation(s_prog3dTex, 0, "aPos");
     glBindAttribLocation(s_prog3dTex, 1, "aUV");
+    glBindAttribLocation(s_prog3dTex, 2, "aColor");
     glLinkProgram(s_prog3dTex);
     GLint ok = 0;
     glGetProgramiv(s_prog3dTex, GL_LINK_STATUS, &ok);
@@ -288,6 +371,7 @@ static void GfxInit3DTex(void) {
     glDeleteShader(fs);
     s_3dTexLocPos = glGetAttribLocation(s_prog3dTex, "aPos");
     s_3dTexLocUV = glGetAttribLocation(s_prog3dTex, "aUV");
+    s_3dTexLocColor = glGetAttribLocation(s_prog3dTex, "aColor");
     s_3dTexLocTint = glGetUniformLocation(s_prog3dTex, "uTint");
     s_3dTexLocSampler = glGetUniformLocation(s_prog3dTex, "uTex");
     OSReport("Gfx: depth-tested textured pipeline ready\n");
@@ -315,6 +399,7 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
     if (s_progTex == 0) return;
     glUseProgram(s_progTex);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glActiveTexture(GL_TEXTURE0);
@@ -330,15 +415,12 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
     glDisableVertexAttribArray(s_texLocUV);
 }
 
-void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv, int count,
-                       unsigned int tex, float r, float g, float b, float a) {
-    if (s_prog3dTex == 0 || !clipXYZ || !uv || count <= 0) return;
+void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
+                       const float* color, int count, unsigned int tex,
+                       float r, float g, float b, float a) {
+    if (s_prog3dTex == 0 || !clipXYZ || !uv || !color || count <= 0) return;
     glUseProgram(s_prog3dTex);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glDepthMask(GL_TRUE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    GfxApply3DState();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glUniform1i(s_3dTexLocSampler, 0);
@@ -347,9 +429,12 @@ void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv, int count,
     glVertexAttribPointer(s_3dTexLocPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
     glEnableVertexAttribArray(s_3dTexLocUV);
     glVertexAttribPointer(s_3dTexLocUV, 2, GL_FLOAT, GL_FALSE, 0, uv);
+    glEnableVertexAttribArray(s_3dTexLocColor);
+    glVertexAttribPointer(s_3dTexLocColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GL_TRIANGLES, 0, count);
     glDisableVertexAttribArray(s_3dTexLocPos);
     glDisableVertexAttribArray(s_3dTexLocUV);
+    glDisableVertexAttribArray(s_3dTexLocColor);
 }
 
 void Gfx2D_DrawSolidTris(const float* clipXY, int count,
@@ -357,6 +442,7 @@ void Gfx2D_DrawSolidTris(const float* clipXY, int count,
     if (s_prog2d == 0 || !clipXY || count <= 0) return;
     glUseProgram(s_prog2d);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
     glUniform4f(s_locColor, r, g, b, a);
     glEnableVertexAttribArray(s_locPos);
@@ -365,24 +451,37 @@ void Gfx2D_DrawSolidTris(const float* clipXY, int count,
     glDisableVertexAttribArray(s_locPos);
 }
 
-void Gfx3D_DrawSolidTris(const float* clipXYZ, int count,
+void Gfx3D_DrawSolidTris(const float* clipXYZ, const float* color, int count,
                          float r, float g, float b, float a) {
-    if (s_prog3d == 0 || !clipXYZ || count <= 0) return;
+    if (s_prog3d == 0 || !clipXYZ || !color || count <= 0) return;
     glUseProgram(s_prog3d);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glDepthMask(GL_TRUE);
-    if (a < 0.999f) {
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    } else {
-        glDisable(GL_BLEND);
-    }
+    GfxApply3DState();
     glUniform4f(s_loc3dColor, r, g, b, a);
     glEnableVertexAttribArray(s_loc3dPos);
     glVertexAttribPointer(s_loc3dPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
+    glEnableVertexAttribArray(s_loc3dVertexColor);
+    glVertexAttribPointer(s_loc3dVertexColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GL_TRIANGLES, 0, count);
     glDisableVertexAttribArray(s_loc3dPos);
+    glDisableVertexAttribArray(s_loc3dVertexColor);
+}
+
+void Gfx3D_SetCullMode(int mode) {
+    s_3dCullMode = mode;
+}
+
+void Gfx3D_SetDepthMode(int enable, int func, int update) {
+    s_3dDepthEnable = enable ? 1 : 0;
+    s_3dDepthFunc = func;
+    s_3dDepthWrite = update ? 1 : 0;
+}
+
+void Gfx3D_SetBlendMode(int mode, int src, int dst, int op) {
+    s_3dBlendMode = mode;
+    s_3dBlendSrc = src;
+    s_3dBlendDst = dst;
+    s_3dBlendOp = op;
+    (void)s_3dBlendOp;
 }
 
 void GfxDebugDrawTest(void) {

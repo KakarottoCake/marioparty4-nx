@@ -572,6 +572,8 @@ void GXInvalidateTexAll(void) {
 #define MAXV 64
 static float s_vClip[MAXV][3];
 static float s_vUV[MAXV][2];
+static float s_vColor[MAXV][4];
+static float s_curVertexColor[4] = {1, 1, 1, 1};
 static int s_vCount = 0;
 static int s_prim = 0;
 static BOOL s_3dMode = FALSE;
@@ -580,10 +582,43 @@ void GXSet3DMode(u8 enable) {
     s_3dMode = enable ? TRUE : FALSE;
 }
 
+// Translate the small set of GX raster states used by HSF materials into the
+// GLES2 backend.  The original GX FIFO is not present on Switch, so these
+// calls update the backend state consumed by Gfx3D_Draw*.
+void GXSetCullMode(GXCullMode mode) {
+    Gfx3D_SetCullMode((int)mode);
+}
+
+void GXSetZMode(GXBool compare_enable, GXCompare func, GXBool update_enable) {
+    Gfx3D_SetDepthMode(compare_enable ? 1 : 0, (int)func,
+                       update_enable ? 1 : 0);
+}
+
+void GXSetBlendMode(GXBlendMode type, GXBlendFactor src_factor,
+                    GXBlendFactor dst_factor, GXLogicOp op) {
+    Gfx3D_SetBlendMode((int)type, (int)src_factor, (int)dst_factor,
+                       (int)op);
+}
+
+void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op,
+                       GXCompare comp1, u8 ref1) {
+    // GLES2 has no fixed-function alpha compare.  Texture alpha still flows
+    // through normal blending; threshold discard is a later material slice.
+    (void)comp0;
+    (void)ref0;
+    (void)op;
+    (void)comp1;
+    (void)ref1;
+}
+
 void GXBegin(GXPrimitive type, GXVtxFmt fmt, u16 nverts) {
     (void)fmt; (void)nverts;
     s_prim = type;
     s_vCount = 0;
+    s_curVertexColor[0] = 1.0f;
+    s_curVertexColor[1] = 1.0f;
+    s_curVertexColor[2] = 1.0f;
+    s_curVertexColor[3] = 1.0f;
 }
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
@@ -603,7 +638,23 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     s_vClip[s_vCount][2] = cz / cw;
     s_vUV[s_vCount][0] = 0.0f;
     s_vUV[s_vCount][1] = 0.0f;
+    s_vColor[s_vCount][0] = s_curVertexColor[0];
+    s_vColor[s_vCount][1] = s_curVertexColor[1];
+    s_vColor[s_vCount][2] = s_curVertexColor[2];
+    s_vColor[s_vCount][3] = s_curVertexColor[3];
     s_vCount++;
+}
+
+void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
+    if (s_vCount == 0 || s_vCount > MAXV) return;
+    s_curVertexColor[0] = r / 255.0f;
+    s_curVertexColor[1] = g / 255.0f;
+    s_curVertexColor[2] = b / 255.0f;
+    s_curVertexColor[3] = a / 255.0f;
+    s_vColor[s_vCount - 1][0] = s_curVertexColor[0];
+    s_vColor[s_vCount - 1][1] = s_curVertexColor[1];
+    s_vColor[s_vCount - 1][2] = s_curVertexColor[2];
+    s_vColor[s_vCount - 1][3] = s_curVertexColor[3];
 }
 
 void GXTexCoord2f32(f32 s, f32 t) {
@@ -618,6 +669,7 @@ void GXEnd(void) {
     float clipXY[MAXV * 3 * 2];
     float clipXYZ[MAXV * 3 * 3];
     float uv[MAXV * 3 * 2];
+    float color[MAXV * 3 * 4];
     int n = 0;
     if (s_prim == GX_QUADS) {
         for (int q = 0; q + 3 < s_vCount; q += 4) {
@@ -628,6 +680,10 @@ void GXEnd(void) {
                 clipXYZ[n*3+1] = s_vClip[idx[j]][1];
                 clipXYZ[n*3+2] = s_vClip[idx[j]][2];
                 uv[n*2+0] = s_vUV[idx[j]][0];     uv[n*2+1] = s_vUV[idx[j]][1];
+                color[n*4+0] = s_vColor[idx[j]][0];
+                color[n*4+1] = s_vColor[idx[j]][1];
+                color[n*4+2] = s_vColor[idx[j]][2];
+                color[n*4+3] = s_vColor[idx[j]][3];
                 n++;
             }
         }
@@ -639,6 +695,10 @@ void GXEnd(void) {
                 clipXYZ[n*3+1] = s_vClip[q+k][1];
                 clipXYZ[n*3+2] = s_vClip[q+k][2];
                 uv[n*2+0] = s_vUV[q+k][0];     uv[n*2+1] = s_vUV[q+k][1];
+                color[n*4+0] = s_vColor[q+k][0];
+                color[n*4+1] = s_vColor[q+k][1];
+                color[n*4+2] = s_vColor[q+k][2];
+                color[n*4+3] = s_vColor[q+k][3];
                 n++;
             }
         }
@@ -656,6 +716,10 @@ void GXEnd(void) {
                 clipXYZ[n*3+1] = s_vClip[idx[k]][1];
                 clipXYZ[n*3+2] = s_vClip[idx[k]][2];
                 uv[n*2+0] = s_vUV[idx[k]][0];     uv[n*2+1] = s_vUV[idx[k]][1];
+                color[n*4+0] = s_vColor[idx[k]][0];
+                color[n*4+1] = s_vColor[idx[k]][1];
+                color[n*4+2] = s_vColor[idx[k]][2];
+                color[n*4+3] = s_vColor[idx[k]][3];
                 n++;
             }
         }
@@ -668,13 +732,17 @@ void GXEnd(void) {
                 clipXYZ[n*3+1] = s_vClip[idx[k]][1];
                 clipXYZ[n*3+2] = s_vClip[idx[k]][2];
                 uv[n*2+0] = s_vUV[idx[k]][0];     uv[n*2+1] = s_vUV[idx[k]][1];
+                color[n*4+0] = s_vColor[idx[k]][0];
+                color[n*4+1] = s_vColor[idx[k]][1];
+                color[n*4+2] = s_vColor[idx[k]][2];
+                color[n*4+3] = s_vColor[idx[k]][3];
                 n++;
             }
         }
     }
     if (s_curTex) {
         if (s_3dMode) {
-            Gfx3D_DrawTexTris(clipXYZ, uv, n, s_curTex,
+            Gfx3D_DrawTexTris(clipXYZ, uv, color, n, s_curTex,
                               s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
         } else {
             Gfx2D_DrawTexTris(clipXY, uv, n, s_curTex,
@@ -682,7 +750,7 @@ void GXEnd(void) {
         }
     } else {
         if (s_3dMode) {
-            Gfx3D_DrawSolidTris(clipXYZ, n,
+            Gfx3D_DrawSolidTris(clipXYZ, color, n,
                                 s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
         } else {
             Gfx2D_DrawSolidTris(clipXY, n,
@@ -698,6 +766,6 @@ void GXSetChanMatColor(GXChannelID id, GXColor c) {
     s_tint[0] = c.r / 255.0f; s_tint[1] = c.g / 255.0f;
     s_tint[2] = c.b / 255.0f; s_tint[3] = c.a / 255.0f;
 }
-// (All other GX state functions are kept as loose no-ops in sys_switch.c.)
+// Remaining GX state functions are kept as loose no-ops in sys_switch.c.
 
 #endif // __SWITCH__

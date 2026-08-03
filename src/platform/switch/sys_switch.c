@@ -147,16 +147,12 @@ void GXSetTevColorOp(s32 stage, u8 op, u8 bias, u8 scale, u8 clamp, u32 out_reg)
 void GXSetTevAlphaIn(s32 stage, u32 a, u32 b, u32 c, u32 d) {}
 void GXSetTevAlphaOp(s32 stage, u8 op, u8 bias, u8 scale, u8 clamp, u32 out_reg) {}
 void GXSetNumChans(u8 num) {}
-void GXSetZMode(u8 enable, s32 func, u8 update_enable) {}
 void GXSetChanCtrl(s32 chan, u8 enable, u8 amb_src, u8 mat_src, u32 light_mask, u8 diff_fn, u8 attn_fn) {}
 void GXSetChanAmbColor(s32 chan, GXColor c) {}
-void GXSetCullMode(s32 mode) {}
 void GXSetZCompLoc(u8 before_tex) {}
 void GXSetNumIndStages(u8 num) {}
 void GXSetTevOp(s32 stage, s32 mode) {}
 void GXSetTevDirect(s32 stage) {}
-void GXSetBlendMode(s32 type, s32 src, s32 dst, s32 op) {}
-void GXSetAlphaCompare(s32 comp0, u8 ref0, s32 op, s32 comp1, u8 ref1) {}
 void GXSetIndTexCoordScale(s32 ind_stage, s32 scale_s, s32 scale_t) {}
 void GXSetIndTexOrder(s32 ind_stage, s32 tex_coord, s32 tex_map) {}
 void GXSetTevIndTile(s32 stage, s32 ind_stage, u16 w, u16 h, u16 tw, u16 th, s32 fmt, s32 mtx, s32 bias, s32 alpha) {}
