@@ -4,6 +4,16 @@
 #ifdef __SWITCH__
 PadState g_Pads[4];
 static SwitchControllerType g_ControllerTypes[4] = { SWITCH_CONTROLLER_NONE };
+static u8 g_ButtonRepeat[4];
+static u8 g_DirectionRepeat[4];
+static u8 g_LastDirection[4];
+
+static s8 SwitchClampStick(s32 value) {
+    value /= 256;
+    if (value < -128) return -128;
+    if (value > 127) return 127;
+    return (s8)value;
+}
 
 void Switch_InitControllers(void) {
     padConfigureInput(4, HidNpadStyleSet_NpadStandard | HidNpadStyleTag_NpadGc);
@@ -40,25 +50,70 @@ void Switch_UpdateControllers(void) {
             if (keys & HidNpadButton_ZL) button |= PAD_BUTTON_TRIGGER_L;
             if (keys & HidNpadButton_ZR) button |= PAD_TRIGGER_Z;
             if (keys & (HidNpadButton_Plus | HidNpadButton_Minus)) button |= PAD_BUTTON_START;
+            HidAnalogStickState lstick = padGetStickPos(&g_Pads[i], 0);
+            HuPadStkX[i] = SwitchClampStick(lstick.x);
+            HuPadStkY[i] = SwitchClampStick(lstick.y);
+
+            HidAnalogStickState rstick = padGetStickPos(&g_Pads[i], 1);
+            HuPadSubStkX[i] = SwitchClampStick(rstick.x);
+            HuPadSubStkY[i] = SwitchClampStick(rstick.y);
+
             if (keys & HidNpadButton_Up) button |= PAD_BUTTON_UP;
             if (keys & HidNpadButton_Down) button |= PAD_BUTTON_DOWN;
             if (keys & HidNpadButton_Left) button |= PAD_BUTTON_LEFT;
             if (keys & HidNpadButton_Right) button |= PAD_BUTTON_RIGHT;
+            if (HuPadStkX[i] < -32) button |= PAD_BUTTON_LEFT;
+            if (HuPadStkX[i] > 32) button |= PAD_BUTTON_RIGHT;
+            if (HuPadStkY[i] > 32) button |= PAD_BUTTON_UP;
+            if (HuPadStkY[i] < -32) button |= PAD_BUTTON_DOWN;
 
-            HuPadBtnDown[i] = ~HuPadBtn[i] & button;
-            HuPadBtn[i] = button;
+            {
+                u16 direction = button & PAD_BUTTON_DIR;
+                u16 buttons = button & (u16)~PAD_BUTTON_DIR;
+                u16 previous = HuPadBtn[i];
+                HuPadBtnDown[i] = buttons & (u16)~previous;
+                HuPadBtn[i] = buttons;
+                HuPadTrigL[i] = (buttons & PAD_BUTTON_TRIGGER_L) ? 255 : 0;
+                HuPadTrigR[i] = (buttons & PAD_BUTTON_TRIGGER_R) ? 255 : 0;
+                HuPadDStk[i] = (u8)direction;
 
-            HidAnalogStickState lstick = padGetStickPos(&g_Pads[i], 0);
-            HuPadStkX[i] = (s8)(lstick.x / 256);
-            HuPadStkY[i] = (s8)(lstick.y / 256);
-
-            HidAnalogStickState rstick = padGetStickPos(&g_Pads[i], 1);
-            HuPadSubStkX[i] = (s8)(rstick.x / 256);
-            HuPadSubStkY[i] = (s8)(rstick.y / 256);
-            
-            HuPadErr[i] = 0; 
+                if (buttons && buttons == previous) {
+                    if (g_ButtonRepeat[i] >= 20) {
+                        HuPadBtnRep[i] = buttons;
+                    } else {
+                        HuPadBtnRep[i] = 0;
+                        g_ButtonRepeat[i]++;
+                    }
+                } else {
+                    g_ButtonRepeat[i] = 0;
+                    HuPadBtnRep[i] = buttons;
+                }
+                if (direction && direction == g_LastDirection[i]) {
+                    if (g_DirectionRepeat[i] >= 20) {
+                        HuPadDStkRep[i] = (u8)direction;
+                    } else {
+                        HuPadDStkRep[i] = 0;
+                        g_DirectionRepeat[i]++;
+                    }
+                } else {
+                    g_DirectionRepeat[i] = 0;
+                    HuPadDStkRep[i] = (u8)direction;
+                }
+                g_LastDirection[i] = (u8)direction;
+            }
+            HuPadErr[i] = 0;
         } else {
             g_ControllerTypes[i] = SWITCH_CONTROLLER_NONE;
+            HuPadBtnDown[i] = 0;
+            HuPadBtn[i] = 0;
+            HuPadBtnRep[i] = 0;
+            HuPadStkX[i] = HuPadStkY[i] = 0;
+            HuPadSubStkX[i] = HuPadSubStkY[i] = 0;
+            HuPadTrigL[i] = HuPadTrigR[i] = 0;
+            HuPadDStk[i] = HuPadDStkRep[i] = 0;
+            g_ButtonRepeat[i] = 0;
+            g_DirectionRepeat[i] = 0;
+            g_LastDirection[i] = 0;
             HuPadErr[i] = -1;
         }
     }

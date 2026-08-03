@@ -296,7 +296,7 @@ void Hu3DAllKill(void) {
     Hu3DLightAllKill();
     Hu3DAnimAllKill();
     if(reflectAnim[0] != (ANIMDATA *)refMapData0) {
-        HuMemDirectFree(reflectAnim[0]);
+        HuSprAnimKill(reflectAnim[0]);
     }
     reflectAnim[0] = HuSprAnimRead(refMapData0);
     if(Hu3DShadowData.buf) {
@@ -355,6 +355,10 @@ s16 Hu3DModelCreate(void *arg0) {
         return -1;
     }
     var_r31->hsf = LoadHSF(arg0);
+    if (!var_r31->hsf) {
+        OSReport("Error: HSF model allocation failed\n");
+        return -1;
+    }
     var_r31->mallocNo = Hu3DMallocNo = (u32)var_r31->hsf;
     var_r31->attr = HU3D_ATTR_NONE;
     var_r31->motAttr = HU3D_ATTR_NONE;
@@ -1859,7 +1863,7 @@ void lightSet(HU3DLIGHT* arg0, s16 arg1, Mtx *arg2, Mtx *arg3, f32 arg8) {
 void Hu3DReflectMapSet(ANIMDATA* arg0) {
 
     if (reflectAnim[0] != (ANIMDATA*) refMapData0) {
-        HuMemDirectFree(reflectAnim[0]);
+        HuSprAnimKill(reflectAnim[0]);
     }
     reflectAnim[0] = HuSprAnimRead(arg0);
     reflectMapNo = 0;

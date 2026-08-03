@@ -82,25 +82,149 @@ void GXLoadPosMtxImm(const void* mtx, u32 id) {
 // ---------------------------------------------------------------------------
 // Texture state + GameCube texture decoding
 // ---------------------------------------------------------------------------
-typedef struct { const void* data; int w, h, fmt; } MyTexObj;
+typedef struct {
+    const void* data;
+    const void* palette;
+    int w;
+    int h;
+    int fmt;
+    int palette_fmt;
+    int palette_entries;
+    u32 tlut;
+} MyTexObj;
 
-// Cache decoded GL textures keyed by source data pointer (data is re-used across
-// frames; decoding every frame would be far too slow).
+typedef struct {
+    const void* data;
+    int fmt;
+    int entries;
+} MyTlutObj;
+
+/* GXTexObj/GXTlutObj are opaque GameCube-sized structs.  Keep the larger
+ * Switch-side state out of those caller-owned buffers; some callers allocate
+ * them as 32-byte/12-byte stack objects. */
+#define TEXOBJ_STATE_MAX 1024
+#define TLUTOBJ_STATE_MAX 64
+static struct {
+    const GXTexObj* key;
+    MyTexObj state;
+} s_texObjStates[TEXOBJ_STATE_MAX];
+static int s_texObjStateN = 0;
+static struct {
+    const GXTlutObj* key;
+    MyTlutObj state;
+} s_tlutObjStates[TLUTOBJ_STATE_MAX];
+static int s_tlutObjStateN = 0;
+
+// Cache decoded GL textures by image and palette.  The same image pointer can
+// be used with different TLUT slots by the original renderer.
 #define TEXCACHE_MAX 512
-static struct { const void* key; unsigned int tex; } s_texCache[TEXCACHE_MAX];
+static struct {
+    const void* key;
+    const void* palette;
+    int fmt;
+    int palette_fmt;
+    unsigned int tex;
+} s_texCache[TEXCACHE_MAX];
 static int s_texCacheN = 0;
+
+#define TLUT_MAX 16
+static MyTlutObj s_tluts[TLUT_MAX];
 
 static unsigned int s_curTex = 0;   // currently bound GL texture (GX_TEXMAP0)
 static float s_tint[4] = {1, 1, 1, 1};
+
+static MyTexObj* GetTexObjState(const GXTexObj* key) {
+    int i;
+    if (!key) return NULL;
+    for (i = 0; i < s_texObjStateN; i++) {
+        if (s_texObjStates[i].key == key) return &s_texObjStates[i].state;
+    }
+    if (s_texObjStateN >= TEXOBJ_STATE_MAX) return NULL;
+    s_texObjStates[s_texObjStateN].key = key;
+    memset(&s_texObjStates[s_texObjStateN].state, 0,
+           sizeof(s_texObjStates[s_texObjStateN].state));
+    return &s_texObjStates[s_texObjStateN++].state;
+}
+
+static MyTlutObj* GetTlutObjState(const GXTlutObj* key) {
+    int i;
+    if (!key) return NULL;
+    for (i = 0; i < s_tlutObjStateN; i++) {
+        if (s_tlutObjStates[i].key == key) return &s_tlutObjStates[i].state;
+    }
+    if (s_tlutObjStateN >= TLUTOBJ_STATE_MAX) return NULL;
+    s_tlutObjStates[s_tlutObjStateN].key = key;
+    memset(&s_tlutObjStates[s_tlutObjStateN].state, 0,
+           sizeof(s_tlutObjStates[s_tlutObjStateN].state));
+    return &s_tlutObjStates[s_tlutObjStateN++].state;
+}
+
+static const MyTlutObj* FindTlutObjState(const GXTlutObj* key) {
+    int i;
+    if (!key) return NULL;
+    for (i = 0; i < s_tlutObjStateN; i++) {
+        if (s_tlutObjStates[i].key == key) return &s_tlutObjStates[i].state;
+    }
+    return NULL;
+}
 
 static inline void PutRGBA(unsigned char* p, int idx, int r, int g, int b, int a) {
     p[idx*4+0] = (unsigned char)r; p[idx*4+1] = (unsigned char)g;
     p[idx*4+2] = (unsigned char)b; p[idx*4+3] = (unsigned char)a;
 }
 
+static int Expand4(int value) { return value * 17; }
+
+static void DecodeRGB565(unsigned value, int* r, int* g, int* b, int* a) {
+    *r = ((value >> 11) & 0x1F) * 255 / 31;
+    *g = ((value >> 5) & 0x3F) * 255 / 63;
+    *b = (value & 0x1F) * 255 / 31;
+    *a = 255;
+}
+
+static void DecodeRGB5A3(unsigned value, int* r, int* g, int* b, int* a) {
+    if (value & 0x8000) {
+        *r = ((value >> 10) & 0x1F) * 255 / 31;
+        *g = ((value >> 5) & 0x1F) * 255 / 31;
+        *b = (value & 0x1F) * 255 / 31;
+        *a = 255;
+    } else {
+        *a = ((value >> 12) & 0x7) * 255 / 7;
+        *r = ((value >> 8) & 0xF) * 255 / 15;
+        *g = ((value >> 4) & 0xF) * 255 / 15;
+        *b = (value & 0xF) * 255 / 15;
+    }
+}
+
+static void DecodePaletteColor(const MyTexObj* obj, int index,
+                               int* r, int* g, int* b, int* a) {
+    const unsigned char* p;
+    unsigned value;
+    if (!obj->palette || index < 0 || index >= obj->palette_entries) {
+        *r = *g = *b = 255;
+        *a = 0;
+        return;
+    }
+    p = (const unsigned char*)obj->palette + index * 2;
+    value = ((unsigned)p[0] << 8) | p[1];
+    switch (obj->palette_fmt) {
+        case GX_TL_IA8:
+            *r = *g = *b = p[0];
+            *a = p[1];
+            break;
+        case GX_TL_RGB565:
+            DecodeRGB565(value, r, g, b, a);
+            break;
+        case GX_TL_RGB5A3:
+        default:
+            DecodeRGB5A3(value, r, g, b, a);
+            break;
+    }
+}
+
 // Decode a GameCube (tiled, big-endian) texture into a linear RGBA8 buffer.
 static void DecodeGCTexture(int fmt, const unsigned char* src, int w, int h,
-                            unsigned char* out) {
+                            const MyTexObj* obj, unsigned char* out) {
     // Default: opaque white (so unsupported formats still show a shape).
     for (int i = 0; i < w * h; i++) PutRGBA(out, i, 255, 255, 255, 255);
     if (!src) return;
@@ -130,40 +254,133 @@ static void DecodeGCTexture(int fmt, const unsigned char* src, int w, int h,
             unsigned v = (src[o] << 8) | src[o + 1];  // big-endian u16
             o += 2;
             int r, g, b, a;
-            if (fmt == GX_TF_RGB565) {
-                r = ((v >> 11) & 0x1F) * 255 / 31;
-                g = ((v >> 5) & 0x3F) * 255 / 63;
-                b = (v & 0x1F) * 255 / 31;
+            if (fmt == GX_TF_RGB565) DecodeRGB565(v, &r, &g, &b, &a);
+            else DecodeRGB5A3(v, &r, &g, &b, &a);
+            if (px < w && py < h) PutRGBA(out, py * w + px, r, g, b, a);
+        }
+    } else if (fmt == GX_TF_I4 || fmt == GX_TF_C4) {
+        // I4/C4: 8x8 tiles, two texels per byte.
+        int o = 0;
+        for (int ty = 0; ty < h; ty += 8)
+        for (int tx = 0; tx < w; tx += 8) {
+            for (int row = 0; row < 8; row++) {
+                for (int col = 0; col < 4; col++) {
+                    unsigned value = src[o++];
+                    int indexes[2] = {(int)(value >> 4), (int)(value & 0xF)};
+                    for (int n = 0; n < 2; n++) {
+                        int px = tx + col * 2 + n;
+                        int py = ty + row;
+                        int r, g, b, a;
+                        if (fmt == GX_TF_C4) {
+                            DecodePaletteColor(obj, indexes[n], &r, &g, &b, &a);
+                        } else {
+                            r = g = b = Expand4(indexes[n]);
+                            a = 255;
+                        }
+                        if (px < w && py < h) PutRGBA(out, py * w + px, r, g, b, a);
+                    }
+                }
+            }
+        }
+    } else if (fmt == GX_TF_I8 || fmt == GX_TF_IA4 || fmt == GX_TF_A8 || fmt == GX_TF_C8) {
+        // I8/IA4/A8/C8: 8x4 tiles, one texel per byte.
+        int o = 0;
+        for (int ty = 0; ty < h; ty += 4)
+        for (int tx = 0; tx < w; tx += 8)
+        for (int row = 0; row < 4; row++)
+        for (int col = 0; col < 8; col++) {
+            unsigned value = src[o++];
+            int px = tx + col;
+            int py = ty + row;
+            int r, g, b, a;
+            if (fmt == GX_TF_C8) {
+                DecodePaletteColor(obj, (int)value, &r, &g, &b, &a);
+            } else if (fmt == GX_TF_I8) {
+                r = g = b = (int)value;
                 a = 255;
-            } else if (v & 0x8000) {                  // RGB555
-                r = ((v >> 10) & 0x1F) * 255 / 31;
-                g = ((v >> 5) & 0x1F) * 255 / 31;
-                b = (v & 0x1F) * 255 / 31;
-                a = 255;
-            } else {                                  // ARGB3444
-                a = ((v >> 12) & 0x7) * 255 / 7;
-                r = ((v >> 8) & 0xF) * 255 / 15;
-                g = ((v >> 4) & 0xF) * 255 / 15;
-                b = (v & 0xF) * 255 / 15;
+            } else if (fmt == GX_TF_IA4) {
+                r = g = b = Expand4((int)(value >> 4));
+                a = Expand4((int)(value & 0xF));
+            } else {
+                r = g = b = 255;
+                a = (int)value;
             }
             if (px < w && py < h) PutRGBA(out, py * w + px, r, g, b, a);
         }
+    } else if (fmt == GX_TF_IA8) {
+        // IA8: 4x4 tiles, intensity byte followed by alpha byte.
+        int o = 0;
+        for (int ty = 0; ty < h; ty += 4)
+        for (int tx = 0; tx < w; tx += 4)
+        for (int k = 0; k < 16; k++) {
+            int px = tx + (k % 4), py = ty + (k / 4);
+            int intensity = src[o++];
+            int alpha = src[o++];
+            if (px < w && py < h) PutRGBA(out, py * w + px,
+                                           intensity, intensity, intensity, alpha);
+        }
+    } else if (fmt == GX_TF_CMPR) {
+        // CMPR is four DXT1 4x4 blocks inside each 8x8 tile.
+        int o = 0;
+        for (int ty = 0; ty < h; ty += 8)
+        for (int tx = 0; tx < w; tx += 8)
+        for (int block = 0; block < 4; block++) {
+            int bx = tx + (block & 1) * 4;
+            int by = ty + (block >> 1) * 4;
+            unsigned c0 = ((unsigned)src[o] << 8) | src[o + 1];
+            unsigned c1 = ((unsigned)src[o + 2] << 8) | src[o + 3];
+            unsigned bits = ((unsigned)src[o + 4] << 24) |
+                            ((unsigned)src[o + 5] << 16) |
+                            ((unsigned)src[o + 6] << 8) | src[o + 7];
+            int r0, g0, b0, a0, r1, g1, b1, a1;
+            int colors[4][4];
+            DecodeRGB565(c0, &r0, &g0, &b0, &a0);
+            DecodeRGB565(c1, &r1, &g1, &b1, &a1);
+            colors[0][0] = r0; colors[0][1] = g0; colors[0][2] = b0; colors[0][3] = 255;
+            colors[1][0] = r1; colors[1][1] = g1; colors[1][2] = b1; colors[1][3] = 255;
+            if (c0 > c1) {
+                colors[2][0] = (2*r0 + r1) / 3; colors[2][1] = (2*g0 + g1) / 3;
+                colors[2][2] = (2*b0 + b1) / 3; colors[2][3] = 255;
+                colors[3][0] = (r0 + 2*r1) / 3; colors[3][1] = (g0 + 2*g1) / 3;
+                colors[3][2] = (b0 + 2*b1) / 3; colors[3][3] = 255;
+            } else {
+                colors[2][0] = (r0 + r1) / 2; colors[2][1] = (g0 + g1) / 2;
+                colors[2][2] = (b0 + b1) / 2; colors[2][3] = 255;
+                colors[3][0] = colors[3][1] = colors[3][2] = 0; colors[3][3] = 0;
+            }
+            o += 8;
+            for (int row = 0; row < 4; row++)
+            for (int col = 0; col < 4; col++) {
+                int index = (bits >> (30 - (row * 4 + col) * 2)) & 3;
+                int px = bx + col, py = by + row;
+                if (px < w && py < h)
+                    PutRGBA(out, py * w + px, colors[index][0], colors[index][1],
+                            colors[index][2], colors[index][3]);
+            }
+        }
     }
-    // Other formats (I4/I8/IA*/C4/C8) fall through as white for now.
 }
 
 static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
     if (!obj || !obj->data) return 0;
     for (int i = 0; i < s_texCacheN; i++)
-        if (s_texCache[i].key == obj->data) return s_texCache[i].tex;
+        if (s_texCache[i].key == obj->data &&
+            s_texCache[i].palette == obj->palette &&
+            s_texCache[i].fmt == obj->fmt &&
+            s_texCache[i].palette_fmt == obj->palette_fmt) {
+            return s_texCache[i].tex;
+        }
 
     int w = obj->w, h = obj->h;
     if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return 0;
     static unsigned char buf[1024 * 1024 * 4];
-    DecodeGCTexture(obj->fmt, (const unsigned char*)obj->data, w, h, buf);
+    DecodeGCTexture(obj->fmt, (const unsigned char*)obj->data, w, h, obj, buf);
     unsigned int tex = GfxCreateTexture(w, h, buf);
     if (s_texCacheN < TEXCACHE_MAX) {
         s_texCache[s_texCacheN].key = obj->data;
+        s_texCache[s_texCacheN].palette = obj->palette;
+        s_texCache[s_texCacheN].fmt = obj->fmt;
+        s_texCache[s_texCacheN].palette_fmt = obj->palette_fmt;
         s_texCache[s_texCacheN].tex = tex;
         s_texCacheN++;
     }
@@ -173,20 +390,65 @@ static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
 void GXInitTexObj(GXTexObj* obj, void* image_ptr, u16 width, u16 height,
                   GXTexFmt format, GXTexWrapMode wrap_s, GXTexWrapMode wrap_t, u8 mip) {
     (void)wrap_s; (void)wrap_t; (void)mip;
-    MyTexObj* t = (MyTexObj*)obj;
-    t->data = image_ptr; t->w = width; t->h = height; t->fmt = (int)format;
+    MyTexObj* t = GetTexObjState(obj);
+    if (!t) return;
+    t->data = image_ptr;
+    t->palette = NULL;
+    t->w = width;
+    t->h = height;
+    t->fmt = (int)format;
+    t->palette_fmt = GX_TL_RGB5A3;
+    t->palette_entries = 0;
+    t->tlut = TLUT_MAX;
 }
 
 void GXInitTexObjCI(GXTexObj* obj, void* image_ptr, u16 width, u16 height,
                     GXCITexFmt format, GXTexWrapMode s, GXTexWrapMode t, u8 mip, u32 tlut) {
-    (void)format; (void)s; (void)t; (void)mip; (void)tlut;
-    MyTexObj* to = (MyTexObj*)obj;
-    to->data = image_ptr; to->w = width; to->h = height; to->fmt = -1;  // palette -> white
+    (void)s; (void)t; (void)mip;
+    MyTexObj* to = GetTexObjState(obj);
+    if (!to) return;
+    to->data = image_ptr;
+    to->w = width;
+    to->h = height;
+    to->fmt = (int)format;
+    to->tlut = tlut;
+    if (tlut < TLUT_MAX) {
+        to->palette = s_tluts[tlut].data;
+        to->palette_fmt = s_tluts[tlut].fmt;
+        to->palette_entries = s_tluts[tlut].entries;
+    } else {
+        to->palette = NULL;
+        to->palette_fmt = GX_TL_RGB5A3;
+        to->palette_entries = 0;
+    }
+}
+
+void GXInitTlutObj(GXTlutObj* obj, void* data, GXTlutFmt fmt, u16 entries) {
+    MyTlutObj* tlut = GetTlutObjState(obj);
+    if (!tlut) return;
+    tlut->data = data;
+    tlut->fmt = (int)fmt;
+    tlut->entries = entries;
+}
+
+void GXLoadTlut(GXTlutObj* obj, u32 tlut_name) {
+    const MyTlutObj* tlut = FindTlutObjState(obj);
+    if (!obj || tlut_name >= TLUT_MAX) return;
+    if (!tlut) return;
+    s_tluts[tlut_name] = *tlut;
 }
 
 void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
+    MyTexObj* state;
     if (id != GX_TEXMAP0) return;      // only map0 feeds our single sampler
-    s_curTex = GetOrCreateTexture((const MyTexObj*)obj);
+    state = GetTexObjState(obj);
+    if (!state) return;
+    if (state->tlut < TLUT_MAX) {
+        state->palette = s_tluts[state->tlut].data;
+        state->palette_fmt = s_tluts[state->tlut].fmt;
+        state->palette_entries = s_tluts[state->tlut].entries;
+    }
+    s_curTex = GetOrCreateTexture(state);
 }
 
 // ---------------------------------------------------------------------------

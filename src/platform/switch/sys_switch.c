@@ -7,6 +7,7 @@
 #include "controller.h"
 #include "gfx_switch.h"
 #include "dolphin/gx/GXStruct.h"
+#include "game/memory.h"
 
 // Background/clear color the engine last requested (via GXSetCopyClear).
 static GXColor s_bgColor = {0, 0, 0, 0};
@@ -20,12 +21,20 @@ static GXRenderModeObj s_renderMode = {0};
 GXRenderModeObj* RenderMode = &s_renderMode;
 s32 minimumVcount = 0;
 float minimumVcountf = 0.0f;
+u32 __OSBusClock;
+u32 __OSCoreClock;
 
 // Stub engine variables
 u8 GWPlayerCfg[4096] = {0};
 // Stub engine subsystem calls
 void HuSysInit(void* mode) {
     extern void HuMemInitAll(void);
+    u64 tick_freq = armGetSystemTickFreq();
+    if (tick_freq == 0) {
+        tick_freq = 19200000;
+    }
+    __OSBusClock = (u32)(tick_freq * 4);
+    __OSCoreClock = __OSBusClock * 3;
     HuMemInitAll();
 }
 void GWInit(void) {}
@@ -91,7 +100,6 @@ u32 OSDisableInterrupts(void) { return 0; }
 void OSRestoreInterrupts(u32 level) {}
 void VISetPostRetraceCallback(void* cb) {}
 void VIWaitForRetrace(void) {
-    Switch_UpdateControllers();
     for (int i = 0; i < 4; i++) {
         u64 kDown = padGetButtonsDown(&g_Pads[i]);
         if (kDown & (HidNpadButton_Plus | HidNpadButton_Minus)) {
@@ -158,8 +166,6 @@ void GXSetTevIndTile(s32 stage, s32 ind_stage, u16 w, u16 h, u16 tw, u16 th, s32
 void GXSetTexCoordGen2(s32 dst_coord, s32 func, s32 src, u32 mtx, u32 normalize, u32 pt_mtx) {}
 void GXSetTexCoordScaleManually(s32 coord, u8 enable, u16 scale_s, u16 scale_t) {}
 void GXInitTexObjLOD(void* obj, s32 minf, s32 magf, float minlod, float maxlod, float lodbias, u8 biasclamp, u8 edgelod, s32 maxaniso) {}
-void GXInitTlutObj(void* obj, void* data, s32 fmt, u16 entries) {}
-void GXLoadTlut(void* obj, u32 tlut_name) {}
 void GXInvalidateTexAll(void) {}
 void GXSetViewportJitter(float left, float top, float width, float height, float nearZ, float farZ, u32 field) {}
 void GXSetTexCopySrc(u32 x, u32 y, u32 w, u32 h) {}
@@ -213,11 +219,17 @@ s32 msmSeGetEntryID(s32 id) { return 0; }
 s32 msmSeGetNumPlay(s32 id) { return 0; }
 void HuAudSStreamPlay(s32 id) {}
 void HuAudFXPlay(s32 id) {}
-u32 OSGetTick(void) { return 0; }
+u32 OSGetTick(void) { return (u32)armGetSystemTick(); }
 void CharInit(void) {}
 void HuWindowInit(void) {}
 void MGSeqInit(void) {}
-s32 msmSysGetSampSize(s32 group) { return 0; }
+s32 msmSysGetSampSize(s32 group) {
+    (void)group;
+    /* The Switch audio backend is not wired yet, but the boot code still
+     * allocates and releases a staging buffer.  A zero-byte allocation
+     * corrupts the original heap allocator's free-list. */
+    return 32;
+}
 void msmSysLoadGroup(s32 group, void* buffer, s32 flag) {}
 s16 HuTHPSprCreateVol(const char* path, s16 loop, float vol) { return 0; }
 
@@ -244,7 +256,39 @@ void VIConfigure(void* mode) {}
 void VIFlush(void) {}
 
 // HSF and Motion stubs for hsfman.c
-void* LoadHSF(void* data) { return NULL; }
+static void SwitchModelRawFree(void *data) {
+    uintptr_t address;
+    s32 i;
+    if (!data) {
+        return;
+    }
+    address = (uintptr_t)data;
+    for (i = 0; i < HEAP_MAX; i++) {
+        uintptr_t start = (uintptr_t)HuMemHeapPtrGet((HeapID)i);
+        uintptr_t end = start + HuMemHeapSizeGet((HeapID)i);
+        if (start != 0 && address > start && address < end) {
+            HuMemDirectFree(data);
+            return;
+        }
+    }
+}
+
+void* LoadHSF(void* data) {
+    void *model;
+    if (!data) {
+        return NULL;
+    }
+    /* HSFDATA is 208 bytes on the Switch ABI.  Keep this stub independent of
+     * the full HSF header so the legacy GX declarations remain untouched. */
+    model = HuMemDirectMalloc(HEAP_MODEL, 256);
+    if (!model) {
+        SwitchModelRawFree(data);
+        return NULL;
+    }
+    memset(model, 0, 256);
+    SwitchModelRawFree(data);
+    return model;
+}
 void MakeDisplayList(void* model) {}
 s32 Hu3DMotionModelCreate(void* model) { return 0; }
 float Hu3DMotionMaxTimeGet(s32 id) { return 0.0f; }
@@ -288,7 +332,7 @@ void printWin(s16 win, float x, float y, const char* str, ...) {}
 void print8(float x, float y, const char* str, ...) {}
 
 u64 OSGetTime(void) {
-    return armGetSystemTickCount();
+    return armGetSystemTick();
 }
 
 // Cache and ARAM stubs

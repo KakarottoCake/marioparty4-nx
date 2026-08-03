@@ -141,7 +141,7 @@ void HuPadRead(void)
 {
 #ifdef __SWITCH__
     Switch_UpdateControllers();
-#endif
+#else
     s16 i;
     for(i=0; i<4; i++) {
         HuPadBtn[i] = _PadBtn[i] & ~(PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT | PAD_BUTTON_UP | PAD_BUTTON_DOWN);
@@ -157,6 +157,7 @@ void HuPadRead(void)
         HuPadErr[i] = _PadErr[i];
         _PadBtnDown[i] = 0;
     }
+#endif
 }
 
 static void PadReadVSync(u32 retraceCount)

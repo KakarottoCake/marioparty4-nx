@@ -138,6 +138,11 @@ HUSPRITE *HuSprCall(void)
         if(sprite->attr & HUSPR_ATTR_FUNC) {
             return sprite;
         }
+        if(!sprite->data || (uintptr_t)sprite->data < 0x1000) {
+            sprite->frameP = NULL;
+            sprite->patP = NULL;
+            return sprite;
+        }
         sprite->frameP = &sprite->data->bank[sprite->bank].frame[sprite->animNo];
         sprite->patP = &sprite->data->pat[sprite->frameP->pat];
         return sprite;
@@ -185,7 +190,8 @@ void HuSprFinish(void)
     s16 dir;
     
     for(sprite = &HuSprData[1], i=1; i<HUSPR_MAX; i++, sprite++) {
-        if(sprite->data && !(sprite->attr & HUSPR_ATTR_FUNC)) {
+        if(sprite->data && (uintptr_t)sprite->data >= 0x1000 &&
+           !(sprite->attr & HUSPR_ATTR_FUNC)) {
             if(!HuSprPauseF || (sprite->attr & HUSPR_ATTR_NOPAUSE)) {
                 anim = sprite->data;
                 bank = &anim->bank[sprite->bank];
@@ -211,8 +217,333 @@ void HuSprPauseSet(BOOL value)
     HuSprPauseF = value;
 }
 
+#ifdef __SWITCH__
+/*
+ * ANIM files were laid out for a 32-bit big-endian GameCube.  The public
+ * ANIMDATA structs contain real pointers, so casting an ANIM file directly to
+ * those structs on the 64-bit Switch shifts every field after the first
+ * pointer.  Rebuild the file into native structs instead.
+ */
+#define SWITCH_ANIM_MAGIC 0x53414E49u /* "SANI" */
+#define SWITCH_ANIM_MAX_ITEMS 4096
+#define SWITCH_ANIM_MAX_BYTES (64u * 1024u * 1024u)
+
+typedef struct SwitchAnimHeader_s {
+    u32 magic;
+    u32 reserved;
+} SwitchAnimHeader;
+
+static u16 SwitchAnimBE16(const u8 *p)
+{
+    return (u16)(((u16)p[0] << 8) | p[1]);
+}
+
+static s16 SwitchAnimBES16(const u8 *p)
+{
+    return (s16)SwitchAnimBE16(p);
+}
+
+static u32 SwitchAnimBE32(const u8 *p)
+{
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) |
+           ((u32)p[2] << 8) | p[3];
+}
+
+static size_t SwitchAnimAlign(size_t value)
+{
+    return (value + 7u) & ~7u;
+}
+
+static SwitchAnimHeader *SwitchAnimHeaderGet(ANIMDATA *anim)
+{
+    SwitchAnimHeader *header;
+    if (!anim || (uintptr_t)anim < sizeof(SwitchAnimHeader)) {
+        return NULL;
+    }
+    header = (SwitchAnimHeader *)((u8 *)anim - sizeof(SwitchAnimHeader));
+    return header->magic == SWITCH_ANIM_MAGIC ? header : NULL;
+}
+
+static BOOL SwitchAnimRangeOK(const u8 *base, u32 offset, u32 size)
+{
+    (void)base;
+    return offset != 0 && offset < SWITCH_ANIM_MAX_BYTES &&
+           size <= SWITCH_ANIM_MAX_BYTES - offset;
+}
+
+static void SwitchAnimRawFree(void *data)
+{
+    uintptr_t address;
+    s32 i;
+    if (!data) {
+        return;
+    }
+    address = (uintptr_t)data;
+    /* Reflection/toon ANIM data is linked into the executable.  Only release
+     * buffers that are inside one of the game's managed heaps. */
+    for (i = 0; i < HEAP_MAX; i++) {
+        uintptr_t start = (uintptr_t)HuMemHeapPtrGet((HeapID)i);
+        uintptr_t end = start + HuMemHeapSizeGet((HeapID)i);
+        if (start != 0 && address > start && address < end) {
+            HuMemDirectFree(data);
+            return;
+        }
+    }
+}
+
+static ANIMDATA *SwitchAnimRead(void *data)
+{
+    const u8 *raw = (const u8 *)data;
+    const u8 *raw_bank;
+    const u8 *raw_pat;
+    const u8 *raw_bmp;
+    ANIMDATA *anim;
+    ANIMBANK *bank;
+    ANIMPAT *pat;
+    ANIMBMP *bmp;
+    ANIMFRAME *frames;
+    ANIMLAYER *layers;
+    SwitchAnimHeader *header;
+    s16 bank_num;
+    s16 pat_num;
+    s16 bmp_num_raw;
+    s16 bmp_num;
+    s32 frame_count = 0;
+    s32 layer_count = 0;
+    size_t size;
+    size_t cursor;
+    s16 i;
+
+    if (!raw) {
+        return NULL;
+    }
+
+    bank_num = SwitchAnimBES16(raw + 0);
+    pat_num = SwitchAnimBES16(raw + 2);
+    bmp_num_raw = SwitchAnimBES16(raw + 4);
+    bmp_num = bmp_num_raw & ANIM_BMP_NUM_MASK;
+    if (bank_num < 0 || bank_num > SWITCH_ANIM_MAX_ITEMS ||
+        pat_num < 0 || pat_num > SWITCH_ANIM_MAX_ITEMS ||
+        bmp_num < 0 || bmp_num > SWITCH_ANIM_MAX_ITEMS) {
+        OSReport("sprman: invalid ANIM counts (%d,%d,%d)\n",
+                 bank_num, pat_num, bmp_num);
+        SwitchAnimRawFree(data);
+        return NULL;
+    }
+
+    {
+        u32 bank_offset = SwitchAnimBE32(raw + 8);
+        u32 pat_offset = SwitchAnimBE32(raw + 12);
+        u32 bmp_offset = SwitchAnimBE32(raw + 16);
+        if ((bank_num && !SwitchAnimRangeOK(raw, bank_offset,
+                                            (u32)bank_num * 8u)) ||
+            (pat_num && !SwitchAnimRangeOK(raw, pat_offset,
+                                           (u32)pat_num * 16u)) ||
+            (bmp_num && !SwitchAnimRangeOK(raw, bmp_offset,
+                                           (u32)bmp_num * 20u))) {
+            OSReport("sprman: invalid ANIM table offsets\n");
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+        raw_bank = raw + bank_offset;
+        raw_pat = raw + pat_offset;
+        raw_bmp = raw + bmp_offset;
+    }
+
+    for (i = 0; i < bank_num; i++) {
+        s16 time_num = SwitchAnimBES16(raw_bank + i * 8);
+        if (time_num < 0 || time_num > SWITCH_ANIM_MAX_ITEMS ||
+            (time_num && !SwitchAnimRangeOK(raw,
+                SwitchAnimBE32(raw_bank + i * 8 + 4), (u32)time_num * 12u))) {
+            OSReport("sprman: invalid ANIM bank %d\n", i);
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+        frame_count += time_num;
+        if (frame_count > SWITCH_ANIM_MAX_ITEMS * SWITCH_ANIM_MAX_ITEMS) {
+            OSReport("sprman: ANIM frame count too large\n");
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+    }
+    for (i = 0; i < pat_num; i++) {
+        s16 layer_num = SwitchAnimBES16(raw_pat + i * 16);
+        if (layer_num < 0 || layer_num > SWITCH_ANIM_MAX_ITEMS ||
+            (layer_num && !SwitchAnimRangeOK(raw,
+                SwitchAnimBE32(raw_pat + i * 16 + 12), (u32)layer_num * 32u))) {
+            OSReport("sprman: invalid ANIM pattern %d\n", i);
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+        layer_count += layer_num;
+        if (layer_count > SWITCH_ANIM_MAX_ITEMS * SWITCH_ANIM_MAX_ITEMS) {
+            OSReport("sprman: ANIM layer count too large\n");
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+    }
+
+    size = sizeof(SwitchAnimHeader) + sizeof(ANIMDATA);
+    size = SwitchAnimAlign(size) + (size_t)bank_num * sizeof(ANIMBANK);
+    size = SwitchAnimAlign(size) + (size_t)pat_num * sizeof(ANIMPAT);
+    size = SwitchAnimAlign(size) + (size_t)bmp_num * sizeof(ANIMBMP);
+    size = SwitchAnimAlign(size) + (size_t)frame_count * sizeof(ANIMFRAME);
+    size = SwitchAnimAlign(size) + (size_t)layer_count * sizeof(ANIMLAYER);
+
+    for (i = 0; i < bmp_num; i++) {
+        u32 data_size = SwitchAnimBE32(raw_bmp + i * 20 + 8);
+        u16 pal_num = SwitchAnimBE16(raw_bmp + i * 20 + 2);
+        u32 data_offset = SwitchAnimBE32(raw_bmp + i * 20 + 16);
+        u32 pal_offset = SwitchAnimBE32(raw_bmp + i * 20 + 12);
+        if (data_size && !SwitchAnimRangeOK(raw, data_offset, data_size)) {
+            OSReport("sprman: invalid ANIM bitmap data %d\n", i);
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+        if (pal_num && !SwitchAnimRangeOK(raw, pal_offset, (u32)pal_num * 2u)) {
+            OSReport("sprman: invalid ANIM palette %d\n", i);
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+        size = SwitchAnimAlign(size) + data_size;
+        size = SwitchAnimAlign(size) + (size_t)pal_num * 2u;
+        if (size > SWITCH_ANIM_MAX_BYTES) {
+            OSReport("sprman: ANIM allocation too large\n");
+            SwitchAnimRawFree(data);
+            return NULL;
+        }
+    }
+
+    header = HuMemDirectMalloc(HEAP_MODEL, (s32)size);
+    if (!header) {
+        SwitchAnimRawFree(data);
+        return NULL;
+    }
+    memset(header, 0, size);
+    header->magic = SWITCH_ANIM_MAGIC;
+    anim = (ANIMDATA *)(header + 1);
+    anim->bankNum = bank_num;
+    anim->patNum = pat_num;
+    anim->bmpNum = bmp_num;
+    anim->useNum = 0;
+
+    cursor = SwitchAnimAlign((size_t)((u8 *)(anim + 1) - (u8 *)header));
+    bank = (ANIMBANK *)((u8 *)header + cursor);
+    cursor += (size_t)bank_num * sizeof(ANIMBANK);
+    cursor = SwitchAnimAlign(cursor);
+    pat = (ANIMPAT *)((u8 *)header + cursor);
+    cursor += (size_t)pat_num * sizeof(ANIMPAT);
+    cursor = SwitchAnimAlign(cursor);
+    bmp = (ANIMBMP *)((u8 *)header + cursor);
+    cursor += (size_t)bmp_num * sizeof(ANIMBMP);
+    cursor = SwitchAnimAlign(cursor);
+    frames = (ANIMFRAME *)((u8 *)header + cursor);
+    cursor += (size_t)frame_count * sizeof(ANIMFRAME);
+    cursor = SwitchAnimAlign(cursor);
+    layers = (ANIMLAYER *)((u8 *)header + cursor);
+    cursor += (size_t)layer_count * sizeof(ANIMLAYER);
+    cursor = SwitchAnimAlign(cursor);
+
+    anim->bank = bank;
+    anim->pat = pat;
+    anim->bmp = bmp;
+
+    {
+        s32 frame_index = 0;
+        for (i = 0; i < bank_num; i++) {
+            const u8 *src = raw_bank + i * 8;
+            s16 time_num = SwitchAnimBES16(src + 0);
+            const u8 *src_frame = raw + SwitchAnimBE32(src + 4);
+            s16 j;
+            bank[i].timeNum = time_num;
+            bank[i].unk = SwitchAnimBES16(src + 2);
+            bank[i].frame = frames + frame_index;
+            for (j = 0; j < time_num; j++) {
+                const u8 *f = src_frame + j * 12;
+                frames[frame_index].pat = SwitchAnimBES16(f + 0);
+                frames[frame_index].time = SwitchAnimBES16(f + 2);
+                frames[frame_index].shiftX = SwitchAnimBES16(f + 4);
+                frames[frame_index].shiftY = SwitchAnimBES16(f + 6);
+                frames[frame_index].flip = SwitchAnimBES16(f + 8);
+                frames[frame_index].pad = SwitchAnimBES16(f + 10);
+                frame_index++;
+            }
+        }
+    }
+
+    for (i = 0; i < pat_num; i++) {
+        const u8 *src = raw_pat + i * 16;
+        s16 layer_num = SwitchAnimBES16(src + 0);
+        const u8 *src_layer = raw + SwitchAnimBE32(src + 12);
+        s16 j;
+        pat[i].layerNum = layer_num;
+        pat[i].centerX = SwitchAnimBES16(src + 2);
+        pat[i].centerY = SwitchAnimBES16(src + 4);
+        pat[i].sizeX = SwitchAnimBES16(src + 6);
+        pat[i].sizeY = SwitchAnimBES16(src + 8);
+        pat[i].layer = layers;
+        for (j = 0; j < layer_num; j++) {
+            const u8 *l = src_layer + j * 32;
+            s16 k;
+            layers->alpha = l[0];
+            layers->flip = l[1];
+            layers->bmpNo = SwitchAnimBES16(l + 2);
+            layers->startX = SwitchAnimBES16(l + 4);
+            layers->startY = SwitchAnimBES16(l + 6);
+            layers->sizeX = SwitchAnimBES16(l + 8);
+            layers->sizeY = SwitchAnimBES16(l + 10);
+            layers->shiftX = SwitchAnimBES16(l + 12);
+            layers->shiftY = SwitchAnimBES16(l + 14);
+            for (k = 0; k < 8; k++) {
+                layers->vtx[k] = SwitchAnimBES16(l + 16 + k * 2);
+            }
+            layers++;
+        }
+    }
+
+    for (i = 0; i < bmp_num; i++) {
+        const u8 *src = raw_bmp + i * 20;
+        u16 pal_num = SwitchAnimBE16(src + 2);
+        s16 size_x = SwitchAnimBES16(src + 4);
+        s16 size_y = SwitchAnimBES16(src + 6);
+        u32 data_size = SwitchAnimBE32(src + 8);
+        u32 pal_offset = SwitchAnimBE32(src + 12);
+        u32 data_offset = SwitchAnimBE32(src + 16);
+        bmp[i].pixSize = src[0];
+        bmp[i].dataFmt = src[1];
+        bmp[i].palNum = (s16)pal_num;
+        bmp[i].sizeX = size_x;
+        bmp[i].sizeY = size_y;
+        bmp[i].dataSize = data_size;
+        if (data_size) {
+            void *copy = (u8 *)header + cursor;
+            cursor = SwitchAnimAlign(cursor + data_size);
+            memcpy(copy, raw + data_offset, data_size);
+            bmp[i].data = copy;
+        }
+        if (pal_num) {
+            void *copy = (u8 *)header + cursor;
+            cursor = SwitchAnimAlign(cursor + (size_t)pal_num * 2u);
+            memcpy(copy, raw + pal_offset, (size_t)pal_num * 2u);
+            bmp[i].palData = copy;
+        }
+    }
+
+    SwitchAnimRawFree(data);
+    return anim;
+}
+#endif
+
 ANIMDATA *HuSprAnimRead(void *data)
 {
+#ifdef __SWITCH__
+    ANIMDATA *converted = (ANIMDATA *)data;
+    if (SwitchAnimHeaderGet(converted)) {
+        converted->useNum++;
+        return converted;
+    }
+    return SwitchAnimRead(data);
+#else
     s16 i;
     ANIMBMP *bmp;
     ANIMBANK *bank;
@@ -241,6 +572,7 @@ ANIMDATA *HuSprAnimRead(void *data)
     }
     anim->useNum = 0;
     return anim;
+#endif
 }
 
 void HuSprAnimLock(ANIMDATA *anim)
@@ -397,6 +729,18 @@ void HuSprKill(s16 sprite)
 
 void HuSprAnimKill(ANIMDATA *anim)
 {
+#ifdef __SWITCH__
+    if (!anim || (uintptr_t)anim < 0x1000) {
+        return;
+    }
+    SwitchAnimHeader *header = SwitchAnimHeaderGet(anim);
+    if (header) {
+        if (--anim->useNum <= 0) {
+            HuMemDirectFree(header);
+        }
+        return;
+    }
+#endif
     if(--anim->useNum <= 0) {
         if(anim->bmpNum & ANIM_BMP_ALLOC) {
             if(anim->bmp->data) {
