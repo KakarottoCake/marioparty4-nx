@@ -32,6 +32,13 @@ extern void GXSet3DMode(u8 enable);
 #define SWITCH_HSF_PALETTE_SIZE 0x10
 #define SWITCH_HSF_MOTION_SIZE 0x10
 #define SWITCH_HSF_TRACK_SIZE 0x10
+#define SWITCH_HSF_CENV_SIZE 0x24
+#define SWITCH_HSF_CENV_SINGLE_SIZE 0x0C
+#define SWITCH_HSF_CENV_DUAL_SIZE 0x10
+#define SWITCH_HSF_CENV_MULTI_SIZE 0x10
+#define SWITCH_HSF_CENV_DUAL_WEIGHT_SIZE 0x0C
+#define SWITCH_HSF_CENV_MULTI_WEIGHT_SIZE 0x08
+#define SWITCH_HSF_SKELETON_SIZE 0x28
 #define SWITCH_HSF_BUFFER_SIZE 12
 #define SWITCH_HSF_MAX_DEPTH 128
 
@@ -90,8 +97,12 @@ typedef struct SwitchHsfContext_s {
     HSFATTRIBUTE *attribute;
     HSFBITMAP *bitmap;
     HSFPALETTE *palette;
+    HSFSKELETON *skeleton;
+    HSFCENV *cenv;
     HSFMOTION *motion;
 } SwitchHsfContext;
+
+static BOOL SwitchHsfEstimateAdd(u32 *total, u32 count, u32 size);
 
 static u16 SwitchHsfBE16(const u8 *p) {
     return (u16)(((u16)p[0] << 8) | p[1]);
@@ -786,6 +797,256 @@ static BOOL SwitchHsfMeshIndex(u32 rawIndex, u32 count, u32 *index) {
     return TRUE;
 }
 
+static BOOL SwitchHsfRelativeRange(const SwitchHsfContext *ctx, u32 base,
+                                   u32 offset, u32 size) {
+    if (!ctx || base > ctx->rawSize || offset > ctx->rawSize - base ||
+        size > ctx->rawSize - (base + offset)) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HSFSKELETON *SwitchHsfParseSkeleton(SwitchHsfContext *ctx) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_SKELETON];
+    HSFSKELETON *skeleton;
+    u32 i;
+
+    if (section->count == 0) {
+        return NULL;
+    }
+    if (!SwitchHsfTableRange(ctx, SWITCH_HSF_SKELETON,
+                             SWITCH_HSF_SKELETON_SIZE)) {
+        return NULL;
+    }
+    skeleton = (HSFSKELETON *)SwitchHsfArenaAlloc(
+        &ctx->arena, section->count * sizeof(HSFSKELETON));
+    if (!skeleton) {
+        return NULL;
+    }
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs +
+                        i * SWITCH_HSF_SKELETON_SIZE;
+        skeleton[i].name = SwitchHsfString(ctx, SwitchHsfBE32(raw));
+        SwitchHsfCopyTransform(&skeleton[i].transform, raw + 4);
+    }
+    return skeleton;
+}
+
+static BOOL SwitchHsfCenvDescriptorSizes(const SwitchHsfContext *ctx,
+                                         u32 *descriptorBytes,
+                                         u32 *weightBase) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_CENV];
+    u32 dataBase;
+    u32 descriptors = 0;
+    u32 i;
+
+    if (!descriptorBytes || !weightBase || section->count == 0 ||
+        !SwitchHsfTableRange(ctx, SWITCH_HSF_CENV, SWITCH_HSF_CENV_SIZE) ||
+        section->ofs > 0xFFFFFFFFU - section->count * SWITCH_HSF_CENV_SIZE) {
+        return FALSE;
+    }
+    dataBase = section->ofs + section->count * SWITCH_HSF_CENV_SIZE;
+    if (!SwitchHsfRange(ctx, dataBase, 0)) {
+        return FALSE;
+    }
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs +
+                        i * SWITCH_HSF_CENV_SIZE;
+        u32 singleCount = SwitchHsfBE32(raw + 0x10);
+        u32 dualCount = SwitchHsfBE32(raw + 0x14);
+        u32 multiCount = SwitchHsfBE32(raw + 0x18);
+        if (!SwitchHsfCountOK(singleCount) || !SwitchHsfCountOK(dualCount) ||
+            !SwitchHsfCountOK(multiCount) ||
+            !SwitchHsfEstimateAdd(&descriptors, singleCount,
+                                   SWITCH_HSF_CENV_SINGLE_SIZE) ||
+            !SwitchHsfEstimateAdd(&descriptors, dualCount,
+                                   SWITCH_HSF_CENV_DUAL_SIZE) ||
+            !SwitchHsfEstimateAdd(&descriptors, multiCount,
+                                   SWITCH_HSF_CENV_MULTI_SIZE)) {
+            return FALSE;
+        }
+    }
+    if (!SwitchHsfRelativeRange(ctx, dataBase, 0, descriptors)) {
+        return FALSE;
+    }
+    if (dataBase > 0xFFFFFFFFU - descriptors) {
+        return FALSE;
+    }
+    *descriptorBytes = descriptors;
+    *weightBase = dataBase + descriptors;
+    return TRUE;
+}
+
+static BOOL SwitchHsfCenvPointerRange(const SwitchHsfContext *ctx, u32 base,
+                                      u32 offset, u32 count, u32 elementSize) {
+    if (count == 0) {
+        return TRUE;
+    }
+    if (elementSize != 0 && count > 0x3FFFFFFFU / elementSize) {
+        return FALSE;
+    }
+    return SwitchHsfRelativeRange(ctx, base, offset, count * elementSize);
+}
+
+static HSFCENV *SwitchHsfParseCenv(SwitchHsfContext *ctx) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_CENV];
+    HSFCENV *cenv;
+    u32 descriptorBytes;
+    u32 dataBase;
+    u32 weightBase;
+    u32 i;
+
+    if (section->count == 0 || !SwitchHsfCenvDescriptorSizes(
+            ctx, &descriptorBytes, &weightBase)) {
+        return NULL;
+    }
+    dataBase = section->ofs + section->count * SWITCH_HSF_CENV_SIZE;
+    cenv = (HSFCENV *)SwitchHsfArenaAlloc(
+        &ctx->arena, section->count * sizeof(HSFCENV));
+    if (!cenv) {
+        return NULL;
+    }
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs +
+                        i * SWITCH_HSF_CENV_SIZE;
+        HSFCENV *dst = &cenv[i];
+        u32 singleCount = SwitchHsfBE32(raw + 0x10);
+        u32 dualCount = SwitchHsfBE32(raw + 0x14);
+        u32 multiCount = SwitchHsfBE32(raw + 0x18);
+        u32 singleOfs = SwitchHsfBE32(raw + 4);
+        u32 dualOfs = SwitchHsfBE32(raw + 8);
+        u32 multiOfs = SwitchHsfBE32(raw + 0x0C);
+        u32 j;
+
+        memset(dst, 0, sizeof(*dst));
+        dst->name = SwitchHsfString(ctx, SwitchHsfBE32(raw));
+        dst->singleCount = singleCount;
+        dst->dualCount = dualCount;
+        dst->multiCount = multiCount;
+        dst->vtxCount = SwitchHsfBE32(raw + 0x1C);
+        dst->copyCount = SwitchHsfBE32(raw + 0x20);
+
+        if (singleCount != 0) {
+            if (!SwitchHsfCenvPointerRange(ctx, dataBase, singleOfs,
+                                           singleCount,
+                                           SWITCH_HSF_CENV_SINGLE_SIZE)) {
+                return NULL;
+            }
+            dst->singleData = (HSFCENVSINGLE *)SwitchHsfArenaAlloc(
+                &ctx->arena, singleCount * sizeof(HSFCENVSINGLE));
+            if (!dst->singleData) {
+                return NULL;
+            }
+            for (j = 0; j < singleCount; j++) {
+                const u8 *src = ctx->raw + dataBase + singleOfs +
+                                j * SWITCH_HSF_CENV_SINGLE_SIZE;
+                dst->singleData[j].target = SwitchHsfBE32(src);
+                dst->singleData[j].pos = SwitchHsfBE16(src + 4);
+                dst->singleData[j].posNum = SwitchHsfBE16(src + 6);
+                dst->singleData[j].normal = SwitchHsfBE16(src + 8);
+                dst->singleData[j].normalNum = SwitchHsfBE16(src + 10);
+            }
+        }
+
+        if (dualCount != 0) {
+            if (!SwitchHsfCenvPointerRange(ctx, dataBase, dualOfs,
+                                           dualCount,
+                                           SWITCH_HSF_CENV_DUAL_SIZE)) {
+                return NULL;
+            }
+            dst->dualData = (HSFCENVDUAL *)SwitchHsfArenaAlloc(
+                &ctx->arena, dualCount * sizeof(HSFCENVDUAL));
+            if (!dst->dualData) {
+                return NULL;
+            }
+            for (j = 0; j < dualCount; j++) {
+                const u8 *src = ctx->raw + dataBase + dualOfs +
+                                j * SWITCH_HSF_CENV_DUAL_SIZE;
+                HSFCENVDUAL *dual = &dst->dualData[j];
+                u32 weightCount = SwitchHsfBE32(src + 8);
+                u32 weightOfs = SwitchHsfBE32(src + 0x0C);
+                u32 k;
+                dual->target1 = SwitchHsfBE32(src);
+                dual->target2 = SwitchHsfBE32(src + 4);
+                dual->weightNum = weightCount;
+                dual->weight = NULL;
+                if (!SwitchHsfCountOK(weightCount) ||
+                    !SwitchHsfCenvPointerRange(
+                        ctx, weightBase, weightOfs, weightCount,
+                        SWITCH_HSF_CENV_DUAL_WEIGHT_SIZE)) {
+                    return NULL;
+                }
+                if (weightCount != 0) {
+                    dual->weight = (HSFCENVDUALWEIGHT *)SwitchHsfArenaAlloc(
+                        &ctx->arena,
+                        weightCount * sizeof(HSFCENVDUALWEIGHT));
+                    if (!dual->weight) {
+                        return NULL;
+                    }
+                    for (k = 0; k < weightCount; k++) {
+                        const u8 *weight = ctx->raw + weightBase + weightOfs +
+                                           k * SWITCH_HSF_CENV_DUAL_WEIGHT_SIZE;
+                        dual->weight[k].weight = SwitchHsfF32(weight);
+                        dual->weight[k].pos = SwitchHsfBE16(weight + 4);
+                        dual->weight[k].posNum = SwitchHsfBE16(weight + 6);
+                        dual->weight[k].normal = SwitchHsfBE16(weight + 8);
+                        dual->weight[k].normalNum = SwitchHsfBE16(weight + 10);
+                    }
+                }
+            }
+        }
+
+        if (multiCount != 0) {
+            if (!SwitchHsfCenvPointerRange(ctx, dataBase, multiOfs,
+                                           multiCount,
+                                           SWITCH_HSF_CENV_MULTI_SIZE)) {
+                return NULL;
+            }
+            dst->multiData = (HSFCENVMULTI *)SwitchHsfArenaAlloc(
+                &ctx->arena, multiCount * sizeof(HSFCENVMULTI));
+            if (!dst->multiData) {
+                return NULL;
+            }
+            for (j = 0; j < multiCount; j++) {
+                const u8 *src = ctx->raw + dataBase + multiOfs +
+                                j * SWITCH_HSF_CENV_MULTI_SIZE;
+                HSFCENVMULTI *multi = &dst->multiData[j];
+                u32 weightCount = SwitchHsfBE32(src);
+                u32 weightOfs = SwitchHsfBE32(src + 0x0C);
+                u32 k;
+                multi->weightNum = weightCount;
+                multi->pos = SwitchHsfBE16(src + 4);
+                multi->posNum = SwitchHsfBE16(src + 6);
+                multi->normal = SwitchHsfBE16(src + 8);
+                multi->normalNum = SwitchHsfBE16(src + 10);
+                multi->weight = NULL;
+                if (!SwitchHsfCountOK(weightCount) ||
+                    !SwitchHsfCenvPointerRange(
+                        ctx, weightBase, weightOfs, weightCount,
+                        SWITCH_HSF_CENV_MULTI_WEIGHT_SIZE)) {
+                    return NULL;
+                }
+                if (weightCount != 0) {
+                    multi->weight = (HSFCENVMULTIWEIGHT *)SwitchHsfArenaAlloc(
+                        &ctx->arena,
+                        weightCount * sizeof(HSFCENVMULTIWEIGHT));
+                    if (!multi->weight) {
+                        return NULL;
+                    }
+                    for (k = 0; k < weightCount; k++) {
+                        const u8 *weight = ctx->raw + weightBase + weightOfs +
+                                           k * SWITCH_HSF_CENV_MULTI_WEIGHT_SIZE;
+                        multi->weight[k].target = SwitchHsfBE32(weight);
+                        multi->weight[k].value = SwitchHsfF32(weight + 4);
+                    }
+                }
+            }
+        }
+    }
+    (void)descriptorBytes;
+    return cenv;
+}
+
 static HSFOBJECT *SwitchHsfParseObjects(SwitchHsfContext *ctx, HSFDATA *model) {
     const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_OBJECT];
     HSFOBJECT *objects;
@@ -829,6 +1090,12 @@ static HSFOBJECT *SwitchHsfParseObjects(SwitchHsfContext *ctx, HSFDATA *model) {
             object->mesh.parent = &objects[parent];
         }
 
+        /* Skeleton records carry the bind pose for joints and null objects.
+         * Copy the raw object transforms first; the skeleton pass below can
+         * replace them where a matching bind-pose name exists. */
+        SwitchHsfCopyTransform(&object->mesh.base, raw + 0x1C);
+        SwitchHsfCopyTransform(&object->mesh.curr, raw + 0x40);
+
         if (object->type == 7) {
             object->type = HSF_OBJ_CAMERA;
             continue;
@@ -838,8 +1105,6 @@ static HSFOBJECT *SwitchHsfParseObjects(SwitchHsfContext *ctx, HSFDATA *model) {
             continue;
         }
 
-        SwitchHsfCopyTransform(&object->mesh.base, raw + 0x1C);
-        SwitchHsfCopyTransform(&object->mesh.curr, raw + 0x40);
         object->mesh.mesh.min.x = SwitchHsfF32(raw + 0x64);
         object->mesh.mesh.min.y = SwitchHsfF32(raw + 0x68);
         object->mesh.mesh.min.z = SwitchHsfF32(raw + 0x6C);
@@ -875,12 +1140,42 @@ static HSFOBJECT *SwitchHsfParseObjects(SwitchHsfContext *ctx, HSFDATA *model) {
         object->mesh.shape = NULL;
         object->mesh.clusterNum = 0;
         object->mesh.cluster = NULL;
-        /* Envelope data is not transformed yet.  Marking it empty keeps all
-         * legacy callers on their existing no-op Switch stubs. */
         object->mesh.cenvNum = 0;
         object->mesh.cenv = NULL;
         object->mesh.file[0] = NULL;
         object->mesh.file[1] = NULL;
+
+        if (ctx->cenv) {
+            u32 cenvIndex = SwitchHsfBE32(raw + 0x138);
+            u32 cenvCount = SwitchHsfBE32(raw + 0x134);
+            if (cenvCount != 0 && cenvIndex != 0xFFFFFFFFU &&
+                cenvIndex < ctx->header.section[SWITCH_HSF_CENV].count &&
+                cenvCount <= ctx->header.section[SWITCH_HSF_CENV].count -
+                              cenvIndex) {
+                object->mesh.cenvNum = cenvCount;
+                object->mesh.cenv = &ctx->cenv[cenvIndex];
+                if (object->mesh.vertex && object->mesh.vertex->count > 0) {
+                    u32 bytes = (u32)object->mesh.vertex->count * sizeof(HuVecF);
+                    object->mesh.file[0] = SwitchHsfArenaAlloc(&ctx->arena,
+                                                                bytes);
+                    if (!object->mesh.file[0]) {
+                        return NULL;
+                    }
+                    memcpy(object->mesh.file[0], object->mesh.vertex->data,
+                           bytes);
+                }
+                if (object->mesh.normal && object->mesh.normal->count > 0) {
+                    u32 bytes = (u32)object->mesh.normal->count * sizeof(Vec);
+                    object->mesh.file[1] = SwitchHsfArenaAlloc(&ctx->arena,
+                                                                bytes);
+                    if (!object->mesh.file[1]) {
+                        return NULL;
+                    }
+                    memcpy(object->mesh.file[1], object->mesh.normal->data,
+                           bytes);
+                }
+            }
+        }
 
         if (childCount > SWITCH_HSF_MAX_CHILDREN) {
             return NULL;
@@ -907,6 +1202,24 @@ static HSFOBJECT *SwitchHsfParseObjects(SwitchHsfContext *ctx, HSFDATA *model) {
         rootIndex = 0;
     }
     model->root = &objects[rootIndex];
+
+    if (ctx->skeleton) {
+        for (i = 0; i < section->count; i++) {
+            u32 j;
+            if (!objects[i].name) {
+                continue;
+            }
+            for (j = 0; j < ctx->header.section[SWITCH_HSF_SKELETON].count;
+                 j++) {
+                if (ctx->skeleton[j].name &&
+                    strcmp(objects[i].name, ctx->skeleton[j].name) == 0) {
+                    objects[i].mesh.base = ctx->skeleton[j].transform;
+                    objects[i].mesh.curr = ctx->skeleton[j].transform;
+                    break;
+                }
+            }
+        }
+    }
     return objects;
 }
 
@@ -1324,6 +1637,130 @@ static BOOL SwitchHsfEstimateMotion(const SwitchHsfContext *ctx, u32 *total) {
     return TRUE;
 }
 
+static BOOL SwitchHsfEstimateSkeleton(const SwitchHsfContext *ctx,
+                                      u32 *total) {
+    const SwitchHsfSection *section =
+        &ctx->header.section[SWITCH_HSF_SKELETON];
+    if (section->count == 0) {
+        return TRUE;
+    }
+    return SwitchHsfTableRange(ctx, SWITCH_HSF_SKELETON,
+                               SWITCH_HSF_SKELETON_SIZE) &&
+           SwitchHsfEstimateAdd(total, section->count,
+                                 sizeof(HSFSKELETON));
+}
+
+static BOOL SwitchHsfEstimateCenv(const SwitchHsfContext *ctx, u32 *total) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_CENV];
+    u32 descriptorBytes;
+    u32 dataBase;
+    u32 weightBase;
+    u32 i;
+
+    if (section->count == 0) {
+        return TRUE;
+    }
+    if (!SwitchHsfCenvDescriptorSizes(ctx, &descriptorBytes, &weightBase) ||
+        !SwitchHsfEstimateAdd(total, section->count, sizeof(HSFCENV))) {
+        return FALSE;
+    }
+    dataBase = section->ofs + section->count * SWITCH_HSF_CENV_SIZE;
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs +
+                        i * SWITCH_HSF_CENV_SIZE;
+        u32 singleCount = SwitchHsfBE32(raw + 0x10);
+        u32 dualCount = SwitchHsfBE32(raw + 0x14);
+        u32 multiCount = SwitchHsfBE32(raw + 0x18);
+        u32 singleOfs = SwitchHsfBE32(raw + 4);
+        u32 dualOfs = SwitchHsfBE32(raw + 8);
+        u32 multiOfs = SwitchHsfBE32(raw + 0x0C);
+        u32 j;
+
+        if (!SwitchHsfCenvPointerRange(ctx, dataBase, singleOfs,
+                                       singleCount,
+                                       SWITCH_HSF_CENV_SINGLE_SIZE) ||
+            !SwitchHsfCenvPointerRange(ctx, dataBase, dualOfs, dualCount,
+                                       SWITCH_HSF_CENV_DUAL_SIZE) ||
+            !SwitchHsfCenvPointerRange(ctx, dataBase, multiOfs, multiCount,
+                                       SWITCH_HSF_CENV_MULTI_SIZE) ||
+            !SwitchHsfEstimateAdd(total, singleCount,
+                                  sizeof(HSFCENVSINGLE)) ||
+            !SwitchHsfEstimateAdd(total, dualCount, sizeof(HSFCENVDUAL)) ||
+            !SwitchHsfEstimateAdd(total, multiCount, sizeof(HSFCENVMULTI))) {
+            return FALSE;
+        }
+        for (j = 0; j < dualCount; j++) {
+            const u8 *dual = ctx->raw + dataBase + dualOfs +
+                             j * SWITCH_HSF_CENV_DUAL_SIZE;
+            u32 weightCount = SwitchHsfBE32(dual + 8);
+            u32 weightOfs = SwitchHsfBE32(dual + 0x0C);
+            if (!SwitchHsfCountOK(weightCount) ||
+                !SwitchHsfCenvPointerRange(ctx, weightBase, weightOfs,
+                                            weightCount,
+                                            SWITCH_HSF_CENV_DUAL_WEIGHT_SIZE) ||
+                !SwitchHsfEstimateAdd(total, weightCount,
+                                      sizeof(HSFCENVDUALWEIGHT))) {
+                return FALSE;
+            }
+        }
+        for (j = 0; j < multiCount; j++) {
+            const u8 *multi = ctx->raw + dataBase + multiOfs +
+                              j * SWITCH_HSF_CENV_MULTI_SIZE;
+            u32 weightCount = SwitchHsfBE32(multi);
+            u32 weightOfs = SwitchHsfBE32(multi + 0x0C);
+            if (!SwitchHsfCountOK(weightCount) ||
+                !SwitchHsfCenvPointerRange(ctx, weightBase, weightOfs,
+                                            weightCount,
+                                            SWITCH_HSF_CENV_MULTI_WEIGHT_SIZE) ||
+                !SwitchHsfEstimateAdd(total, weightCount,
+                                      sizeof(HSFCENVMULTIWEIGHT))) {
+                return FALSE;
+            }
+        }
+    }
+    (void)descriptorBytes;
+    return TRUE;
+}
+
+static BOOL SwitchHsfEstimateEnvelopeBuffers(const SwitchHsfContext *ctx,
+                                             u32 *total) {
+    const SwitchHsfSection *objects = &ctx->header.section[SWITCH_HSF_OBJECT];
+    const SwitchHsfSection *vertices = &ctx->header.section[SWITCH_HSF_VERTEX];
+    const SwitchHsfSection *normals = &ctx->header.section[SWITCH_HSF_NORMAL];
+    u32 i;
+
+    if (ctx->header.section[SWITCH_HSF_CENV].count == 0 ||
+        objects->count == 0) {
+        return TRUE;
+    }
+    if (!SwitchHsfTableRange(ctx, SWITCH_HSF_VERTEX, SWITCH_HSF_BUFFER_SIZE) ||
+        !SwitchHsfTableRange(ctx, SWITCH_HSF_NORMAL, SWITCH_HSF_BUFFER_SIZE) ||
+        objects->count > 0xFFFFFFFFU / SWITCH_HSF_OBJECT_SIZE) {
+        return FALSE;
+    }
+    for (i = 0; i < objects->count; i++) {
+        const u8 *raw = ctx->raw + objects->ofs + i * SWITCH_HSF_OBJECT_SIZE;
+        u32 cenvCount = SwitchHsfBE32(raw + 0x134);
+        u32 vertexIndex = SwitchHsfBE32(raw + 0x108);
+        u32 normalIndex = SwitchHsfBE32(raw + 0x10C);
+        u32 vertexCount;
+        u32 normalCount;
+        if (cenvCount == 0 || vertexIndex >= vertices->count ||
+            normalIndex >= normals->count) {
+            continue;
+        }
+        vertexCount = SwitchHsfBE32(ctx->raw + vertices->ofs +
+                                    vertexIndex * SWITCH_HSF_BUFFER_SIZE + 4);
+        normalCount = SwitchHsfBE32(ctx->raw + normals->ofs +
+                                    normalIndex * SWITCH_HSF_BUFFER_SIZE + 4);
+        if (!SwitchHsfEstimateAdd(total, vertexCount, sizeof(HuVecF)) ||
+            !SwitchHsfEstimateAdd(total, normalCount, sizeof(Vec))) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL SwitchHsfEstimateArena(const SwitchHsfContext *ctx, u32 *total) {
     const SwitchHsfSection *objectSection = &ctx->header.section[SWITCH_HSF_OBJECT];
     u32 i;
@@ -1345,7 +1782,10 @@ static BOOL SwitchHsfEstimateArena(const SwitchHsfContext *ctx, u32 *total) {
         !SwitchHsfEstimateNormals(ctx, total) ||
         !SwitchHsfEstimateBuffers(ctx, SWITCH_HSF_ST, 8, total) ||
         !SwitchHsfEstimateBuffers(ctx, SWITCH_HSF_COLOR, 4, total) ||
-        !SwitchHsfEstimateFaces(ctx, total)) {
+        !SwitchHsfEstimateFaces(ctx, total) ||
+        !SwitchHsfEstimateSkeleton(ctx, total) ||
+        !SwitchHsfEstimateCenv(ctx, total) ||
+        !SwitchHsfEstimateEnvelopeBuffers(ctx, total)) {
         return FALSE;
     }
     if (objectSection->count == 0) {
@@ -1481,8 +1921,13 @@ void *LoadHSF(void *data) {
     model->face = ctx.face;
     model->faceNum = (s16)ctx.header.section[SWITCH_HSF_FACE].count;
     model->objectNum = (s16)ctx.header.section[SWITCH_HSF_OBJECT].count;
-    model->cenvNum = 0;
-    model->skeletonNum = 0;
+    ctx.skeleton = SwitchHsfParseSkeleton(&ctx);
+    ctx.cenv = SwitchHsfParseCenv(&ctx);
+    model->cenv = ctx.cenv;
+    model->cenvNum = ctx.cenv ? (s16)ctx.header.section[SWITCH_HSF_CENV].count : 0;
+    model->skeleton = ctx.skeleton;
+    model->skeletonNum = ctx.skeleton ?
+        (s16)ctx.header.section[SWITCH_HSF_SKELETON].count : 0;
     model->clusterNum = 0;
     model->partNum = 0;
     model->shapeNum = 0;
@@ -1496,8 +1941,19 @@ void *LoadHSF(void *data) {
         goto fail;
     }
 
-    OSReport("HSF Switch: model objects=%d motionTracks=%d arena=%u/%u\n",
-             model->objectNum, model->motionNum, ctx.arena.used, arenaSize);
+    {
+        s32 envelopeMeshes = 0;
+        s32 i;
+        for (i = 0; i < model->objectNum; i++) {
+            if (model->object[i].mesh.cenvNum != 0) {
+                envelopeMeshes++;
+            }
+        }
+        OSReport("HSF Switch: model objects=%d skeletons=%d cenv=%d "
+                 "envelopeMeshes=%d motionTracks=%d arena=%u/%u\n",
+                 model->objectNum, model->skeletonNum, model->cenvNum,
+                 envelopeMeshes, model->motionNum, ctx.arena.used, arenaSize);
+    }
     SwitchModelRawFree(data);
     return model;
 
@@ -1513,30 +1969,318 @@ void MakeDisplayList(HU3DMODELID modelId, u32 no) {
     (void)no;
 }
 
-static void SwitchHsfObjectLocal(const HSFOBJECT *object, Mtx out) {
+static void SwitchHsfObjectLocalMode(const HSFOBJECT *object, BOOL base,
+                                     Mtx out) {
+    const HSFTRANSFORM *transform = base ? &object->mesh.base :
+                                             &object->mesh.curr;
     PSMTXIdentity(out);
-    mtxRot(out, object->mesh.curr.rot.x, object->mesh.curr.rot.y,
-           object->mesh.curr.rot.z);
-    mtxScaleCat(out, object->mesh.curr.scale.x, object->mesh.curr.scale.y,
-                object->mesh.curr.scale.z);
-    mtxTransCat(out, object->mesh.curr.pos.x, object->mesh.curr.pos.y,
-                object->mesh.curr.pos.z);
+    mtxRot(out, transform->rot.x, transform->rot.y, transform->rot.z);
+    mtxScaleCat(out, transform->scale.x, transform->scale.y,
+                transform->scale.z);
+    mtxTransCat(out, transform->pos.x, transform->pos.y, transform->pos.z);
 }
 
-static void SwitchHsfObjectMatrix(const HSFOBJECT *object, Mtx model, Mtx out) {
+static void SwitchHsfObjectMatrixMode(const HSFOBJECT *object, BOOL base,
+                                      Mtx model, Mtx out) {
     const HSFOBJECT *chain[SWITCH_HSF_MAX_DEPTH];
     const HSFOBJECT *current = object;
     s32 count = 0;
     s32 i;
-    PSMTXCopy(model, out);
+    if (model) {
+        PSMTXCopy(model, out);
+    } else {
+        PSMTXIdentity(out);
+    }
     while (current && count < SWITCH_HSF_MAX_DEPTH) {
         chain[count++] = current;
         current = current->mesh.parent;
     }
     for (i = count - 1; i >= 0; i--) {
         Mtx local;
-        SwitchHsfObjectLocal(chain[i], local);
+        SwitchHsfObjectLocalMode(chain[i], base, local);
         PSMTXConcat(out, local, out);
+    }
+}
+
+static void SwitchHsfObjectMatrix(const HSFOBJECT *object, Mtx model, Mtx out) {
+    SwitchHsfObjectMatrixMode(object, FALSE, model, out);
+}
+
+static u32 SwitchHsfMtxInverse(const Mtx src, Mtx dst) {
+    float a = src[0][0], b = src[0][1], c = src[0][2];
+    float d = src[1][0], e = src[1][1], f = src[1][2];
+    float g = src[2][0], h = src[2][1], i = src[2][2];
+    float det = a * (e * i - f * h) - b * (d * i - f * g) +
+                c * (d * h - e * g);
+    float inv;
+
+    if (fabsf(det) < 0.000001f) {
+        PSMTXIdentity(dst);
+        return 0;
+    }
+    inv = 1.0f / det;
+    dst[0][0] = (e * i - f * h) * inv;
+    dst[0][1] = (c * h - b * i) * inv;
+    dst[0][2] = (b * f - c * e) * inv;
+    dst[1][0] = (f * g - d * i) * inv;
+    dst[1][1] = (a * i - c * g) * inv;
+    dst[1][2] = (c * d - a * f) * inv;
+    dst[2][0] = (d * h - e * g) * inv;
+    dst[2][1] = (b * g - a * h) * inv;
+    dst[2][2] = (a * e - b * d) * inv;
+    dst[0][3] = -(dst[0][0] * src[0][3] + dst[0][1] * src[1][3] +
+                  dst[0][2] * src[2][3]);
+    dst[1][3] = -(dst[1][0] * src[0][3] + dst[1][1] * src[1][3] +
+                  dst[1][2] * src[2][3]);
+    dst[2][3] = -(dst[2][0] * src[0][3] + dst[2][1] * src[1][3] +
+                  dst[2][2] * src[2][3]);
+    return 1;
+}
+
+static void SwitchHsfMtxMultVec(const Mtx matrix, const HuVecF *source,
+                                HuVecF *destination) {
+    HuVecF value;
+    value.x = matrix[0][0] * source->x + matrix[0][1] * source->y +
+              matrix[0][2] * source->z + matrix[0][3];
+    value.y = matrix[1][0] * source->x + matrix[1][1] * source->y +
+              matrix[1][2] * source->z + matrix[1][3];
+    value.z = matrix[2][0] * source->x + matrix[2][1] * source->y +
+              matrix[2][2] * source->z + matrix[2][3];
+    *destination = value;
+}
+
+static void SwitchHsfMtxMultVecArray(const Mtx matrix,
+                                     const HuVecF *source,
+                                     HuVecF *destination, u32 count) {
+    u32 i;
+    for (i = 0; i < count; i++) {
+        SwitchHsfMtxMultVec(matrix, &source[i], &destination[i]);
+    }
+}
+
+static BOOL SwitchHsfSkinMatrix(const HSFOBJECT *mesh,
+                                const HSFOBJECT *target,
+                                const Mtx meshCurrentInverse,
+                                const Mtx meshBase, Mtx out) {
+    Mtx targetCurrent;
+    Mtx targetBase;
+    Mtx targetBaseInverse;
+    Mtx temp;
+    Mtx temp2;
+
+    SwitchHsfObjectMatrixMode(target, FALSE, NULL, targetCurrent);
+    SwitchHsfObjectMatrixMode(target, TRUE, NULL, targetBase);
+    if (!SwitchHsfMtxInverse(targetBase, targetBaseInverse)) {
+        return FALSE;
+    }
+    PSMTXConcat(targetCurrent, targetBaseInverse, temp);
+    PSMTXConcat(temp, meshBase, temp2);
+    PSMTXConcat(meshCurrentInverse, temp2, out);
+    (void)mesh;
+    return TRUE;
+}
+
+static void SwitchHsfMatrixBlend(const Mtx first, const Mtx second,
+                                 float firstWeight, Mtx out) {
+    float secondWeight = 1.0f - firstWeight;
+    s32 row;
+    s32 column;
+    for (row = 0; row < 3; row++) {
+        for (column = 0; column < 4; column++) {
+            out[row][column] = first[row][column] * firstWeight +
+                               second[row][column] * secondWeight;
+        }
+    }
+}
+
+static BOOL SwitchHsfEnvelopeRange(u32 start, u32 count, s32 available) {
+    return start <= (u32)available && count <= (u32)available - start;
+}
+
+static const HSFOBJECT *SwitchHsfEnvelopeTarget(const HSFDATA *model,
+                                                u32 target) {
+    if (!model || !model->object || target >= (u32)model->objectNum) {
+        return NULL;
+    }
+    return &model->object[target];
+}
+
+static void SwitchHsfUpdateEnvelope(const HSFDATA *model, HSFOBJECT *object) {
+    const HuVecF *sourceVertex;
+    HuVecF *destinationVertex;
+    const Vec *sourceNormal;
+    Vec *destinationNormal;
+    Mtx meshCurrent;
+    Mtx meshCurrentInverse;
+    Mtx meshBase;
+    u32 cenvIndex;
+    u32 i;
+
+    if (!model || !object || object->mesh.cenvNum == 0 ||
+        !object->mesh.vertex || !object->mesh.vertex->data ||
+        !object->mesh.file[0]) {
+        return;
+    }
+    sourceVertex = (const HuVecF *)object->mesh.vertex->data;
+    destinationVertex = (HuVecF *)object->mesh.file[0];
+    sourceNormal = object->mesh.normal && object->mesh.normal->data ?
+        (const Vec *)object->mesh.normal->data : NULL;
+    destinationNormal = object->mesh.file[1] ? (Vec *)object->mesh.file[1] : NULL;
+
+    SwitchHsfObjectMatrixMode(object, FALSE, NULL, meshCurrent);
+    SwitchHsfObjectMatrixMode(object, TRUE, NULL, meshBase);
+    if (!SwitchHsfMtxInverse(meshCurrent, meshCurrentInverse)) {
+        return;
+    }
+    memcpy(destinationVertex, sourceVertex,
+           (u32)object->mesh.vertex->count * sizeof(HuVecF));
+    if (sourceNormal && destinationNormal) {
+        memcpy(destinationNormal, sourceNormal,
+               (u32)object->mesh.normal->count * sizeof(Vec));
+    }
+
+    for (cenvIndex = 0; cenvIndex < object->mesh.cenvNum; cenvIndex++) {
+        const HSFCENV *cenv = &object->mesh.cenv[cenvIndex];
+        for (i = 0; i < cenv->singleCount; i++) {
+            const HSFCENVSINGLE *single = &cenv->singleData[i];
+            const HSFOBJECT *target = SwitchHsfEnvelopeTarget(
+                model, single->target);
+            Mtx matrix;
+            Mtx normalMatrix;
+            if (!target ||
+                !SwitchHsfEnvelopeRange(single->pos, single->posNum,
+                                        object->mesh.vertex->count) ||
+                (single->normalNum != 0 &&
+                 (!sourceNormal || !destinationNormal ||
+                  !SwitchHsfEnvelopeRange(single->normal, single->normalNum,
+                                          object->mesh.normal->count))) ||
+                !SwitchHsfSkinMatrix(object, target, meshCurrentInverse,
+                                      meshBase, matrix)) {
+                continue;
+            }
+            SwitchHsfMtxMultVecArray(matrix, sourceVertex + single->pos,
+                                     destinationVertex + single->pos,
+                                     single->posNum);
+            if (sourceNormal && destinationNormal && single->normalNum != 0 &&
+                PSMTXInvXpose(matrix, normalMatrix)) {
+                SwitchHsfMtxMultVecArray(
+                    normalMatrix, (const HuVecF *)(sourceNormal + single->normal),
+                    (HuVecF *)(destinationNormal + single->normal),
+                    single->normalNum);
+            }
+        }
+
+        for (i = 0; i < cenv->dualCount; i++) {
+            const HSFCENVDUAL *dual = &cenv->dualData[i];
+            const HSFOBJECT *target1 = SwitchHsfEnvelopeTarget(
+                model, dual->target1);
+            const HSFOBJECT *target2 = SwitchHsfEnvelopeTarget(
+                model, dual->target2);
+            Mtx matrix1;
+            Mtx matrix2;
+            if (!target1 || !target2 ||
+                !SwitchHsfSkinMatrix(object, target1, meshCurrentInverse,
+                                      meshBase, matrix1) ||
+                !SwitchHsfSkinMatrix(object, target2, meshCurrentInverse,
+                                      meshBase, matrix2)) {
+                continue;
+            }
+            {
+                u32 j;
+                for (j = 0; j < dual->weightNum; j++) {
+                    const HSFCENVDUALWEIGHT *weight = &dual->weight[j];
+                    float value = weight->weight;
+                    Mtx matrix;
+                    Mtx normalMatrix;
+                    if (value < 0.0f) value = 0.0f;
+                    if (value > 1.0f) value = 1.0f;
+                    if (!SwitchHsfEnvelopeRange(weight->pos, weight->posNum,
+                                                object->mesh.vertex->count) ||
+                        (weight->normalNum != 0 &&
+                         (!sourceNormal || !destinationNormal ||
+                          !SwitchHsfEnvelopeRange(
+                              weight->normal, weight->normalNum,
+                              object->mesh.normal->count)))) {
+                        continue;
+                    }
+                    SwitchHsfMatrixBlend(matrix1, matrix2, value, matrix);
+                    SwitchHsfMtxMultVecArray(matrix, sourceVertex + weight->pos,
+                                             destinationVertex + weight->pos,
+                                             weight->posNum);
+                    if (sourceNormal && destinationNormal &&
+                        weight->normalNum != 0 &&
+                        PSMTXInvXpose(matrix, normalMatrix)) {
+                        SwitchHsfMtxMultVecArray(
+                            normalMatrix,
+                            (const HuVecF *)(sourceNormal + weight->normal),
+                            (HuVecF *)(destinationNormal + weight->normal),
+                            weight->normalNum);
+                    }
+                }
+            }
+        }
+
+        for (i = 0; i < cenv->multiCount; i++) {
+            const HSFCENVMULTI *multi = &cenv->multiData[i];
+            u32 j;
+            if (!SwitchHsfEnvelopeRange(multi->pos, multi->posNum,
+                                        object->mesh.vertex->count) ||
+                (multi->normalNum != 0 &&
+                 (!sourceNormal || !destinationNormal ||
+                  !SwitchHsfEnvelopeRange(multi->normal, multi->normalNum,
+                                          object->mesh.normal->count)))) {
+                continue;
+            }
+            for (j = 0; j < multi->weightNum; j++) {
+                const HSFCENVMULTIWEIGHT *weight = &multi->weight[j];
+                const HSFOBJECT *target = SwitchHsfEnvelopeTarget(
+                    model, weight->target);
+                Mtx matrix;
+                Mtx normalMatrix;
+                HuVecF transformed;
+                Vec transformedNormal;
+                u32 k;
+                if (!target || !SwitchHsfSkinMatrix(
+                        object, target, meshCurrentInverse, meshBase, matrix)) {
+                    continue;
+                }
+                for (k = 0; k < multi->posNum; k++) {
+                    SwitchHsfMtxMultVec(matrix, &sourceVertex[multi->pos + k],
+                                        &transformed);
+                    destinationVertex[multi->pos + k].x += weight->value *
+                        (transformed.x - sourceVertex[multi->pos + k].x);
+                    destinationVertex[multi->pos + k].y += weight->value *
+                        (transformed.y - sourceVertex[multi->pos + k].y);
+                    destinationVertex[multi->pos + k].z += weight->value *
+                        (transformed.z - sourceVertex[multi->pos + k].z);
+                }
+                if (sourceNormal && destinationNormal && multi->normalNum != 0 &&
+                    PSMTXInvXpose(matrix, normalMatrix)) {
+                    for (k = 0; k < multi->normalNum; k++) {
+                        SwitchHsfMtxMultVec(normalMatrix,
+                                            &sourceNormal[multi->normal + k],
+                                            &transformedNormal);
+                        destinationNormal[multi->normal + k].x += weight->value *
+                            (transformedNormal.x -
+                             sourceNormal[multi->normal + k].x);
+                        destinationNormal[multi->normal + k].y += weight->value *
+                            (transformedNormal.y -
+                             sourceNormal[multi->normal + k].y);
+                        destinationNormal[multi->normal + k].z += weight->value *
+                            (transformedNormal.z -
+                             sourceNormal[multi->normal + k].z);
+                    }
+                }
+            }
+        }
+
+        if (cenv->copyCount != 0 &&
+            SwitchHsfEnvelopeRange(cenv->vtxCount, cenv->copyCount,
+                                   object->mesh.vertex->count)) {
+            memcpy(destinationVertex + cenv->vtxCount,
+                   sourceVertex + cenv->vtxCount,
+                   cenv->copyCount * sizeof(HuVecF));
+        }
     }
 }
 
@@ -1729,7 +2473,9 @@ static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index,
         return;
     }
     {
-        const HuVecF *vertex = (const HuVecF *)object->mesh.vertex->data;
+        const HuVecF *vertex = object->mesh.file[0] ?
+            (const HuVecF *)object->mesh.file[0] :
+            (const HuVecF *)object->mesh.vertex->data;
         GXPosition3f32(vertex[vertexIndex].x, vertex[vertexIndex].y,
                        vertex[vertexIndex].z);
     }
@@ -1862,6 +2608,11 @@ void Hu3DDraw(HU3DMODEL *modelP, Mtx mtx, Vec *scale) {
     model = modelP->hsf;
     GXSet3DMode(TRUE);
     GXInvalidateTexAll();
+    for (i = 0; i < model->objectNum; i++) {
+        if (model->object[i].type == HSF_OBJ_MESH) {
+            SwitchHsfUpdateEnvelope(model, &model->object[i]);
+        }
+    }
     for (i = 0; i < model->objectNum; i++) {
         HSFOBJECT *object = &model->object[i];
         Mtx objectMatrix;
