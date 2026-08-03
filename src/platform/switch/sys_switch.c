@@ -133,33 +133,7 @@ void EnvelopeProc(void) {}
 // Additional Dolphin GX/MTX library stubs (loose no-ops).
 // NOTE: matrices, GXSetProjection/GXLoadPosMtxImm, GXBegin/GXPosition/GXTexCoord/
 // GXEnd, GXInitTexObj*/GXLoadTexObj and GXSetChanMatColor now live in gx_gl.c.
-void GXSetViewport(float left, float top, float width, float height, float nearZ, float farZ) {}
-void GXSetScissor(u32 left, u32 top, u32 width, u32 height) {}
-void GXClearVtxDesc(void) {}
-void GXSetVtxDesc(u8 attr, u8 type) {}
-void GXSetVtxAttrFmt(u8 vtxfmt, u32 attr, u32 type, u32 size, u8 frac) {}
-void GXSetTevColor(s32 id, void* color) {}
-void GXSetNumTexGens(u8 num) {}
-void GXSetNumTevStages(u8 num) {}
-void GXSetTevOrder(s32 stage, u8 texcoord, u32 texmap, u8 color) {}
-void GXSetTevColorIn(s32 stage, u32 a, u32 b, u32 c, u32 d) {}
-void GXSetTevColorOp(s32 stage, u8 op, u8 bias, u8 scale, u8 clamp, u32 out_reg) {}
-void GXSetTevAlphaIn(s32 stage, u32 a, u32 b, u32 c, u32 d) {}
-void GXSetTevAlphaOp(s32 stage, u8 op, u8 bias, u8 scale, u8 clamp, u32 out_reg) {}
-void GXSetNumChans(u8 num) {}
-void GXSetChanCtrl(s32 chan, u8 enable, u8 amb_src, u8 mat_src, u32 light_mask, u8 diff_fn, u8 attn_fn) {}
-void GXSetChanAmbColor(s32 chan, GXColor c) {}
-void GXSetZCompLoc(u8 before_tex) {}
-void GXSetNumIndStages(u8 num) {}
-void GXSetTevOp(s32 stage, s32 mode) {}
-void GXSetTevDirect(s32 stage) {}
-void GXSetIndTexCoordScale(s32 ind_stage, s32 scale_s, s32 scale_t) {}
-void GXSetIndTexOrder(s32 ind_stage, s32 tex_coord, s32 tex_map) {}
-void GXSetTevIndTile(s32 stage, s32 ind_stage, u16 w, u16 h, u16 tw, u16 th, s32 fmt, s32 mtx, s32 bias, s32 alpha) {}
-void GXSetTexCoordGen2(s32 dst_coord, s32 func, s32 src, u32 mtx, u32 normalize, u32 pt_mtx) {}
-void GXSetTexCoordScaleManually(s32 coord, u8 enable, u16 scale_s, u16 scale_t) {}
 void GXInitTexObjLOD(void* obj, s32 minf, s32 magf, float minlod, float maxlod, float lodbias, u8 biasclamp, u8 edgelod, s32 maxaniso) {}
-void GXSetViewportJitter(float left, float top, float width, float height, float nearZ, float farZ, u32 field) {}
 void GXSetTexCopySrc(u32 x, u32 y, u32 w, u32 h) {}
 void GXSetTexCopyDst(u32 w, u32 h, u32 fmt, u8 mip) {}
 void GXSetCurrentMtx(u32 id) {}
