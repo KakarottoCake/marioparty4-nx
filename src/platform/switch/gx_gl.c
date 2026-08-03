@@ -243,8 +243,66 @@ static int s_texCacheN = 0;
 #define TLUT_MAX 16
 static MyTlutObj s_tluts[TLUT_MAX];
 
-static unsigned int s_curTex = 0;   // currently bound GL texture (GX_TEXMAP0)
+static unsigned int s_curTex = 0;   // compatibility alias for GX_TEXMAP0
+static unsigned int s_texMaps[8];   // Aurora-style per-map texture bindings
 static float s_tint[4] = {1, 1, 1, 1};
+static GXBool s_useMaterialTint = TRUE;
+
+// GX TEV state.  The original hardware stores this in BP registers; Aurora
+// keeps an equivalent decoded state and generates shader code from it.  The
+// Switch path keeps the decoded values in a compact GLES2-friendly snapshot.
+static GfxTevState s_tevState;
+static BOOL s_tevStateReady = FALSE;
+
+static void GXGLInitTevState(void) {
+    int i;
+    memset(&s_tevState, 0, sizeof(s_tevState));
+    s_tevState.numStages = 1;
+    for (i = 0; i < GFX_TEV_MAX_STAGES; i++) {
+        GfxTevStageState* stage = &s_tevState.stages[i];
+        stage->colorIn[0] = GX_CC_ZERO;
+        stage->colorIn[1] = GX_CC_ZERO;
+        stage->colorIn[2] = GX_CC_ZERO;
+        stage->colorIn[3] = GX_CC_ZERO;
+        stage->alphaIn[0] = GX_CA_ZERO;
+        stage->alphaIn[1] = GX_CA_ZERO;
+        stage->alphaIn[2] = GX_CA_ZERO;
+        stage->alphaIn[3] = GX_CA_ZERO;
+        stage->colorOp = GX_TEV_ADD;
+        stage->colorBias = GX_TB_ZERO;
+        stage->colorScale = GX_CS_SCALE_1;
+        stage->colorClamp = GX_TRUE;
+        stage->colorOut = GX_TEVPREV;
+        stage->alphaOp = GX_TEV_ADD;
+        stage->alphaBias = GX_TB_ZERO;
+        stage->alphaScale = GX_CS_SCALE_1;
+        stage->alphaClamp = GX_TRUE;
+        stage->alphaOut = GX_TEVPREV;
+        stage->texMap = GX_TEXMAP_NULL;
+        stage->channel = GX_COLOR_NULL;
+        stage->kColorSel = GX_TEV_KCSEL_1;
+        stage->kAlphaSel = GX_TEV_KASEL_1;
+    }
+    // Match GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE), the common startup mode.
+    s_tevState.stages[0].colorIn[0] = GX_CC_ZERO;
+    s_tevState.stages[0].colorIn[1] = GX_CC_TEXC;
+    s_tevState.stages[0].colorIn[2] = GX_CC_RASC;
+    s_tevState.stages[0].alphaIn[0] = GX_CA_ZERO;
+    s_tevState.stages[0].alphaIn[1] = GX_CA_TEXA;
+    s_tevState.stages[0].alphaIn[2] = GX_CA_RASA;
+    s_tevState.stages[0].texMap = GX_TEXMAP0;
+    s_tevState.stages[0].channel = GX_COLOR0A0;
+    s_tevStateReady = TRUE;
+}
+
+static void GXGLEnsureTevState(void) {
+    if (!s_tevStateReady) GXGLInitTevState();
+}
+
+static void GXGLPushTevState(void) {
+    GXGLEnsureTevState();
+    GfxSetTevState(&s_tevState);
+}
 
 static MyTexObj* GetTexObjState(const GXTexObj* key) {
     int i;
@@ -562,7 +620,7 @@ void GXLoadTlut(GXTlutObj* obj, u32 tlut_name) {
 
 void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
     MyTexObj* state;
-    if (id != GX_TEXMAP0) return;      // only map0 feeds our single sampler
+    if (id >= GX_MAX_TEXMAP) return;
     state = GetTexObjState(obj);
     if (!state) return;
     if (state->tlut < TLUT_MAX) {
@@ -570,12 +628,12 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
         state->palette_fmt = s_tluts[state->tlut].fmt;
         state->palette_entries = s_tluts[state->tlut].entries;
     }
-    s_curTex = GetOrCreateTexture(state);
+    s_texMaps[id] = GetOrCreateTexture(state);
+    if (id == GX_TEXMAP0) s_curTex = s_texMaps[id];
 }
 
 void GXInvalidateTexAll(void) {
-    /* The first HSF renderer is solid-material only.  Clearing this state
-     * prevents the last sprite texture from tinting a 3D mesh. */
+    memset(s_texMaps, 0, sizeof(s_texMaps));
     s_curTex = 0;
 }
 
@@ -587,12 +645,19 @@ static float s_vClip[MAXV][3];
 static float s_vUV[MAXV][2];
 static float s_vColor[MAXV][4];
 static float s_curVertexColor[4] = {1, 1, 1, 1};
+static float s_curNormal[3] = {0, 0, 1};
 static int s_vCount = 0;
 static int s_prim = 0;
 static BOOL s_3dMode = FALSE;
 
 void GXSet3DMode(u8 enable) {
     s_3dMode = enable ? TRUE : FALSE;
+    if (enable) {
+        // HSF's native path supplies material state directly.  Do not let a
+        // previous sprite's multi-stage TEV setup leak into the mesh pass.
+        GXGLInitTevState();
+        s_useMaterialTint = TRUE;
+    }
 }
 
 // Translate the small set of GX raster states used by HSF materials into the
@@ -621,6 +686,7 @@ void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op,
 
 void GXBegin(GXPrimitive type, GXVtxFmt fmt, u16 nverts) {
     (void)fmt; (void)nverts;
+    GXGLEnsureTevState();
     s_prim = type;
     s_vCount = 0;
     s_curVertexColor[0] = 1.0f;
@@ -653,6 +719,33 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     s_vCount++;
 }
 
+void GXPosition2f32(f32 x, f32 y) { GXPosition3f32(x, y, 0.0f); }
+void GXPosition2u16(u16 x, u16 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+void GXPosition2s16(s16 x, s16 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+void GXPosition2u8(u8 x, u8 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+void GXPosition2s8(s8 x, s8 y) { GXPosition3f32((f32)x, (f32)y, 0.0f); }
+void GXPosition3u16(u16 x, u16 y, u16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+void GXPosition3s16(s16 x, s16 y, s16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+void GXPosition3u8(u8 x, u8 y, u8 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+void GXPosition3s8(s8 x, s8 y, s8 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
+
+void GXNormal3f32(f32 x, f32 y, f32 z) {
+    s_curNormal[0] = x;
+    s_curNormal[1] = y;
+    s_curNormal[2] = z;
+}
+
+void GXNormal3s16(s16 x, s16 y, s16 z) {
+    GXNormal3f32((f32)x / 256.0f, (f32)y / 256.0f, (f32)z / 256.0f);
+}
+
+void GXNormal3s8(s8 x, s8 y, s8 z) {
+    GXNormal3f32((f32)x, (f32)y, (f32)z);
+}
+
+void GXNormal1x16(u16 index) { (void)index; }
+void GXNormal1x8(u8 index) { (void)index; }
+
 void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
     if (s_vCount == 0 || s_vCount > MAXV) return;
     s_curVertexColor[0] = r / 255.0f;
@@ -665,19 +758,92 @@ void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
     s_vColor[s_vCount - 1][3] = s_curVertexColor[3];
 }
 
+void GXColor3u8(u8 r, u8 g, u8 b) { GXColor4u8(r, g, b, 255); }
+void GXColor1u32(u32 color) {
+    GXColor4u8((u8)(color >> 24), (u8)(color >> 16),
+               (u8)(color >> 8), (u8)color);
+}
+void GXColor1u16(u16 color) { (void)color; }
+void GXColor1x16(u16 index) { (void)index; }
+void GXColor1x8(u8 index) { (void)index; }
+
 void GXTexCoord2f32(f32 s, f32 t) {
     if (s_vCount == 0 || s_vCount > MAXV) return;
     s_vUV[s_vCount - 1][0] = s;
     s_vUV[s_vCount - 1][1] = t;
 }
 
+void GXTexCoord2u16(u16 s, u16 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord2s16(s16 s, s16 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord2u8(u8 s, u8 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord2s8(s8 s, s8 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord1f32(f32 s, f32 t) { GXTexCoord2f32(s, t); }
+void GXTexCoord1u16(u16 s, u16 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord1s16(s16 s, s16 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord1u8(u8 s, u8 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord1s8(s8 s, s8 t) { GXTexCoord2f32((f32)s, (f32)t); }
+void GXTexCoord1x16(u16 index) { (void)index; }
+void GXTexCoord1x8(u8 index) { (void)index; }
+
 void GXEnd(void) {
-    if (s_vCount < 3) { s_vCount = 0; return; }
+    int minimum = (s_prim == GX_POINTS) ? 1 :
+                  ((s_prim == GX_LINES || s_prim == GX_LINESTRIP) ? 2 : 3);
+    if (s_vCount < minimum) { s_vCount = 0; return; }
     // Expand quads (0,1,2,3) into two triangles (0,1,2)(0,2,3).
     float clipXY[MAXV * 3 * 2];
     float clipXYZ[MAXV * 3 * 3];
     float uv[MAXV * 3 * 2];
     float color[MAXV * 3 * 4];
+
+    if (s_prim == GX_LINES || s_prim == GX_LINESTRIP || s_prim == GX_POINTS) {
+        for (int i = 0; i < s_vCount; i++) {
+            clipXY[i * 2 + 0] = s_vClip[i][0];
+            clipXY[i * 2 + 1] = s_vClip[i][1];
+            clipXYZ[i * 3 + 0] = s_vClip[i][0];
+            clipXYZ[i * 3 + 1] = s_vClip[i][1];
+            clipXYZ[i * 3 + 2] = s_vClip[i][2];
+            uv[i * 2 + 0] = s_vUV[i][0];
+            uv[i * 2 + 1] = s_vUV[i][1];
+            color[i * 4 + 0] = s_vColor[i][0];
+            color[i * 4 + 1] = s_vColor[i][1];
+            color[i * 4 + 2] = s_vColor[i][2];
+            color[i * 4 + 3] = s_vColor[i][3];
+        }
+        GXGLPushTevState();
+        float drawTint[4] = {
+            s_useMaterialTint ? s_tint[0] : 1.0f,
+            s_useMaterialTint ? s_tint[1] : 1.0f,
+            s_useMaterialTint ? s_tint[2] : 1.0f,
+            s_useMaterialTint ? s_tint[3] : 1.0f
+        };
+        unsigned int drawTex = 0;
+        int map = s_tevState.stages[0].texMap;
+        if (map >= GX_TEXMAP0 && map <= GX_TEXMAP7) drawTex = s_texMaps[map];
+        int primitive = s_prim == GX_LINESTRIP ? 1 :
+                        (s_prim == GX_POINTS ? 2 : 0);
+        if (drawTex) {
+            if (s_3dMode) {
+                Gfx3D_DrawTexGeometry(clipXYZ, uv, color, s_vCount,
+                                      primitive, drawTex, drawTint[0],
+                                      drawTint[1], drawTint[2], drawTint[3]);
+            } else {
+                Gfx2D_DrawTexGeometry(clipXY, uv, color, s_vCount,
+                                      primitive, drawTex, drawTint[0],
+                                      drawTint[1], drawTint[2], drawTint[3]);
+            }
+        } else if (s_3dMode) {
+            Gfx3D_DrawSolidGeometry(clipXYZ, color, s_vCount, primitive,
+                                    drawTint[0], drawTint[1], drawTint[2],
+                                    drawTint[3]);
+        } else {
+            Gfx2D_DrawSolidGeometry(clipXY, color, s_vCount, primitive,
+                                    drawTint[0], drawTint[1], drawTint[2],
+                                    drawTint[3]);
+        }
+        s_vCount = 0;
+        return;
+    }
+
     int n = 0;
     if (s_prim == GX_QUADS) {
         for (int q = 0; q + 3 < s_vCount; q += 4) {
@@ -748,24 +914,354 @@ void GXEnd(void) {
             }
         }
     }
-    if (s_curTex) {
+    GXGLPushTevState();
+    float drawTint[4] = {
+        s_useMaterialTint ? s_tint[0] : 1.0f,
+        s_useMaterialTint ? s_tint[1] : 1.0f,
+        s_useMaterialTint ? s_tint[2] : 1.0f,
+        s_useMaterialTint ? s_tint[3] : 1.0f
+    };
+    unsigned int drawTex = 0;
+    if (s_tevState.numStages > 0) {
+        int map = s_tevState.stages[0].texMap;
+        if (map >= GX_TEXMAP0 && map <= GX_TEXMAP7) {
+            drawTex = s_texMaps[map];
+        }
+    }
+    if (drawTex) {
         if (s_3dMode) {
-            Gfx3D_DrawTexTris(clipXYZ, uv, color, n, s_curTex,
-                              s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+            Gfx3D_DrawTexTris(clipXYZ, uv, color, n, drawTex,
+                              drawTint[0], drawTint[1], drawTint[2], drawTint[3]);
         } else {
-            Gfx2D_DrawTexTris(clipXY, uv, n, s_curTex,
-                              s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+            Gfx2D_DrawTexTris(clipXY, uv, n, color, drawTex,
+                              drawTint[0], drawTint[1], drawTint[2], drawTint[3]);
         }
     } else {
         if (s_3dMode) {
             Gfx3D_DrawSolidTris(clipXYZ, color, n,
-                                s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+                                drawTint[0], drawTint[1], drawTint[2], drawTint[3]);
         } else {
-            Gfx2D_DrawSolidTris(clipXY, n,
-                                s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+            Gfx2D_DrawSolidTris(clipXY, color, n,
+                                drawTint[0], drawTint[1], drawTint[2], drawTint[3]);
         }
     }
     s_vCount = 0;
+}
+
+static u8 s_numTexGens = 0;
+static GXAttrType s_vtxDesc[GX_VA_MAX_ATTR];
+static GXCompCnt s_vtxCnt[GX_MAX_VTXFMT][GX_VA_MAX_ATTR];
+static GXCompType s_vtxType[GX_MAX_VTXFMT][GX_VA_MAX_ATTR];
+static u8 s_vtxFrac[GX_MAX_VTXFMT][GX_VA_MAX_ATTR];
+static GXTexGenType s_texGenFunc[GX_MAX_TEXCOORD];
+static GXTexGenSrc s_texGenSrc[GX_MAX_TEXCOORD];
+static GXColor s_chanAmb[2];
+static GXBool s_chanLighting[2];
+
+void GXSetViewport(f32 left, f32 top, f32 width, f32 height,
+                   f32 nearZ, f32 farZ) {
+    GfxSetViewport(left, top, width, height, nearZ, farZ);
+}
+
+void GXSetViewportJitter(f32 left, f32 top, f32 width, f32 height,
+                         f32 nearZ, f32 farZ, u32 field) {
+    (void)field;
+    GfxSetViewport(left, top, width, height, nearZ, farZ);
+}
+
+void GXSetScissor(u32 left, u32 top, u32 width, u32 height) {
+    GfxSetScissor(left, top, width, height);
+}
+
+void GXClearVtxDesc(void) {
+    memset(s_vtxDesc, 0, sizeof(s_vtxDesc));
+}
+
+void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
+    if (attr < GX_VA_MAX_ATTR) s_vtxDesc[attr] = type;
+}
+
+void GXSetVtxDescv(GXVtxDescList* list) {
+    if (!list) return;
+    while (list->attr != GX_VA_NULL) {
+        GXSetVtxDesc(list->attr, list->type);
+        list++;
+    }
+}
+
+void GXSetVtxAttrFmt(GXVtxFmt fmt, GXAttr attr, GXCompCnt cnt,
+                     GXCompType type, u8 frac) {
+    if (fmt >= GX_MAX_VTXFMT || attr >= GX_VA_MAX_ATTR) return;
+    s_vtxCnt[fmt][attr] = cnt;
+    s_vtxType[fmt][attr] = type;
+    s_vtxFrac[fmt][attr] = frac;
+}
+
+void GXSetNumTexGens(u8 num) {
+    s_numTexGens = num > GX_MAX_TEXCOORD ? GX_MAX_TEXCOORD : num;
+}
+
+void GXSetTexCoordGen2(GXTexCoordID coord, GXTexGenType func,
+                       GXTexGenSrc src, u32 mtx, GXBool normalize,
+                       u32 postMtx) {
+    (void)mtx;
+    (void)normalize;
+    (void)postMtx;
+    if (coord >= GX_MAX_TEXCOORD) return;
+    s_texGenFunc[coord] = func;
+    s_texGenSrc[coord] = src;
+}
+
+void GXSetLineWidth(u8 width, GXTexOffset texOffsets) {
+    (void)width;
+    (void)texOffsets;
+}
+
+void GXSetPointSize(u8 pointSize, GXTexOffset texOffsets) {
+    (void)pointSize;
+    (void)texOffsets;
+}
+
+void GXEnableTexOffsets(GXTexCoordID coord, GXBool lineEnable,
+                        GXBool pointEnable) {
+    (void)coord;
+    (void)lineEnable;
+    (void)pointEnable;
+}
+
+void GXSetTevColor(GXTevRegID id, GXColor color) {
+    GXGLEnsureTevState();
+    if (id >= GX_TEVREG0 && id <= GX_TEVREG2) {
+        float* dst = s_tevState.regs[id - GX_TEVREG0];
+        dst[0] = color.r / 255.0f;
+        dst[1] = color.g / 255.0f;
+        dst[2] = color.b / 255.0f;
+        dst[3] = color.a / 255.0f;
+    }
+}
+
+void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
+    GXGLEnsureTevState();
+    if (id >= GX_TEVREG0 && id <= GX_TEVREG2) {
+        float* dst = s_tevState.regs[id - GX_TEVREG0];
+        dst[0] = color.r / 1023.0f;
+        dst[1] = color.g / 1023.0f;
+        dst[2] = color.b / 1023.0f;
+        dst[3] = color.a / 1023.0f;
+    }
+}
+
+void GXSetTevKColor(GXTevKColorID id, GXColor color) {
+    GXGLEnsureTevState();
+    if (id < GX_MAX_KCOLOR) {
+        s_tevState.kColors[id][0] = color.r / 255.0f;
+        s_tevState.kColors[id][1] = color.g / 255.0f;
+        s_tevState.kColors[id][2] = color.b / 255.0f;
+        s_tevState.kColors[id][3] = color.a / 255.0f;
+    }
+}
+
+void GXSetTevKColorSel(GXTevStageID stage, GXTevKColorSel sel) {
+    GXGLEnsureTevState();
+    if (stage < GFX_TEV_MAX_STAGES) s_tevState.stages[stage].kColorSel = sel;
+}
+
+void GXSetTevKAlphaSel(GXTevStageID stage, GXTevKAlphaSel sel) {
+    GXGLEnsureTevState();
+    if (stage < GFX_TEV_MAX_STAGES) s_tevState.stages[stage].kAlphaSel = sel;
+}
+
+void GXSetTevSwapMode(GXTevStageID stage, GXTevSwapSel rasSel,
+                      GXTevSwapSel texSel) {
+    (void)stage;
+    (void)rasSel;
+    (void)texSel;
+}
+
+void GXSetTevSwapModeTable(GXTevSwapSel table, GXTevColorChan red,
+                           GXTevColorChan green, GXTevColorChan blue,
+                           GXTevColorChan alpha) {
+    (void)table;
+    (void)red;
+    (void)green;
+    (void)blue;
+    (void)alpha;
+}
+
+void GXSetTevColorIn(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b,
+                     GXTevColorArg c, GXTevColorArg d) {
+    GXGLEnsureTevState();
+    if (stage >= GFX_TEV_MAX_STAGES) return;
+    s_tevState.stages[stage].colorIn[0] = a;
+    s_tevState.stages[stage].colorIn[1] = b;
+    s_tevState.stages[stage].colorIn[2] = c;
+    s_tevState.stages[stage].colorIn[3] = d;
+}
+
+void GXSetTevAlphaIn(GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b,
+                     GXTevAlphaArg c, GXTevAlphaArg d) {
+    GXGLEnsureTevState();
+    if (stage >= GFX_TEV_MAX_STAGES) return;
+    s_tevState.stages[stage].alphaIn[0] = a;
+    s_tevState.stages[stage].alphaIn[1] = b;
+    s_tevState.stages[stage].alphaIn[2] = c;
+    s_tevState.stages[stage].alphaIn[3] = d;
+}
+
+void GXSetTevColorOp(GXTevStageID stage, GXTevOp op, GXTevBias bias,
+                     GXTevScale scale, GXBool clamp, GXTevRegID outReg) {
+    GXGLEnsureTevState();
+    if (stage >= GFX_TEV_MAX_STAGES) return;
+    s_tevState.stages[stage].colorOp = op;
+    s_tevState.stages[stage].colorBias = bias;
+    s_tevState.stages[stage].colorScale = scale;
+    s_tevState.stages[stage].colorClamp = clamp ? 1 : 0;
+    s_tevState.stages[stage].colorOut = outReg;
+}
+
+void GXSetTevAlphaOp(GXTevStageID stage, GXTevOp op, GXTevBias bias,
+                     GXTevScale scale, GXBool clamp, GXTevRegID outReg) {
+    GXGLEnsureTevState();
+    if (stage >= GFX_TEV_MAX_STAGES) return;
+    s_tevState.stages[stage].alphaOp = op;
+    s_tevState.stages[stage].alphaBias = bias;
+    s_tevState.stages[stage].alphaScale = scale;
+    s_tevState.stages[stage].alphaClamp = clamp ? 1 : 0;
+    s_tevState.stages[stage].alphaOut = outReg;
+}
+
+void GXSetTevOp(GXTevStageID stage, GXTevMode mode) {
+    GXTevColorArg carg = stage == GX_TEVSTAGE0 ? GX_CC_RASC : GX_CC_CPREV;
+    GXTevAlphaArg aarg = stage == GX_TEVSTAGE0 ? GX_CA_RASA : GX_CA_APREV;
+    switch (mode) {
+        case GX_MODULATE:
+            GXSetTevColorIn(stage, GX_CC_ZERO, GX_CC_TEXC, carg, GX_CC_ZERO);
+            GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_TEXA, aarg, GX_CA_ZERO);
+            break;
+        case GX_DECAL:
+            GXSetTevColorIn(stage, carg, GX_CC_TEXC, GX_CC_TEXA, GX_CC_ZERO);
+            GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, aarg);
+            break;
+        case GX_BLEND:
+            GXSetTevColorIn(stage, carg, GX_CC_ONE, GX_CC_TEXC, GX_CC_ZERO);
+            GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_TEXA, aarg, GX_CA_ZERO);
+            break;
+        case GX_REPLACE:
+            GXSetTevColorIn(stage, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+            GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+            break;
+        case GX_PASSCLR:
+        default:
+            GXSetTevColorIn(stage, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, carg);
+            GXSetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, aarg);
+            break;
+    }
+    GXSetTevColorOp(stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1,
+                    GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaOp(stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1,
+                    GX_TRUE, GX_TEVPREV);
+}
+
+void GXSetTevOrder(GXTevStageID stage, GXTexCoordID coord,
+                   GXTexMapID map, GXChannelID color) {
+    GXGLEnsureTevState();
+    if (stage >= GFX_TEV_MAX_STAGES) return;
+    s_tevState.stages[stage].texMap = map;
+    s_tevState.stages[stage].channel = color;
+    (void)coord;
+}
+
+void GXSetNumTevStages(u8 num) {
+    GXGLEnsureTevState();
+    s_tevState.numStages = num == 0 ? 1 : num;
+}
+
+void GXSetTevDirect(GXTevStageID stage) {
+    (void)stage;
+}
+
+void GXSetNumIndStages(u8 num) {
+    (void)num;
+}
+
+void GXSetIndTexCoordScale(GXIndTexStageID stage, GXIndTexScale s,
+                           GXIndTexScale t) {
+    (void)stage;
+    (void)s;
+    (void)t;
+}
+
+void GXSetIndTexOrder(GXIndTexStageID stage, GXTexCoordID coord,
+                      GXTexMapID map) {
+    (void)stage;
+    (void)coord;
+    (void)map;
+}
+
+void GXSetTevIndTile(GXTevStageID stage, GXIndTexStageID indStage,
+                     u16 w, u16 h, u16 tw, u16 th, GXIndTexFormat fmt,
+                     GXIndTexMtxID mtx, GXIndTexBiasSel bias,
+                     GXIndTexAlphaSel alpha) {
+    (void)stage;
+    (void)indStage;
+    (void)w;
+    (void)h;
+    (void)tw;
+    (void)th;
+    (void)fmt;
+    (void)mtx;
+    (void)bias;
+    (void)alpha;
+}
+
+void GXSetTexCoordScaleManually(GXTexCoordID coord, u8 enable,
+                                u16 scaleS, u16 scaleT) {
+    (void)coord;
+    (void)enable;
+    (void)scaleS;
+    (void)scaleT;
+}
+
+void GXSetNumChans(u8 num) {
+    (void)num;
+}
+
+void GXSetChanCtrl(GXChannelID chan, GXBool enable, GXColorSrc ambSrc,
+                   GXColorSrc matSrc, u32 lightMask, GXDiffuseFn diffFn,
+                   GXAttnFn attnFn) {
+    (void)ambSrc;
+    (void)matSrc;
+    (void)lightMask;
+    (void)diffFn;
+    (void)attnFn;
+    if (chan == GX_COLOR0 || chan == GX_ALPHA0 || chan == GX_COLOR0A0) {
+        s_useMaterialTint = matSrc == GX_SRC_REG ? TRUE : FALSE;
+    }
+    if (chan == GX_COLOR0 || chan == GX_ALPHA0 || chan == GX_COLOR0A0) {
+        s_chanLighting[0] = enable;
+    } else if (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) {
+        s_chanLighting[1] = enable;
+    }
+}
+
+void GXSetChanAmbColor(GXChannelID chan, GXColor color) {
+    if (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) {
+        s_chanAmb[1] = color;
+    } else {
+        s_chanAmb[0] = color;
+    }
+}
+
+void GXSetZCompLoc(GXBool beforeTex) {
+    (void)beforeTex;
+}
+
+void GXSetColorUpdate(GXBool enable) {
+    Gfx3D_SetColorUpdate(enable ? 1 : 0);
+}
+
+void GXSetAlphaUpdate(GXBool enable) {
+    Gfx3D_SetAlphaUpdate(enable ? 1 : 0);
 }
 
 // Capture the material color as our draw tint (texture is modulated by it).
