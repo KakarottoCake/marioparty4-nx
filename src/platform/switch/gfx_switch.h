@@ -40,9 +40,18 @@ void GfxDeleteTexture(unsigned int tex);
 void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
                        unsigned int tex, float r, float g, float b, float a);
 
+// Textured triangles with full clip-space XYZ coordinates and depth testing.
+void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv, int count,
+                       unsigned int tex, float r, float g, float b, float a);
+
 // Draw triangles in clip space without sampling a texture.  This is used by
 // the first native HSF mesh path, where materials are currently solid-color.
 void Gfx2D_DrawSolidTris(const float* clipXY, int count,
+                         float r, float g, float b, float a);
+
+// Draw solid triangles with full OpenGL clip-space XYZ coordinates and depth
+// testing.  This is used by the native HSF mesh path.
+void Gfx3D_DrawSolidTris(const float* clipXYZ, int count,
                          float r, float g, float b, float a);
 
 // Tear down the GL context.
