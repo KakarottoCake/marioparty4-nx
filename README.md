@@ -13,9 +13,9 @@ The long-term goal is a clean port plus quality-of-life extras: native GameCube
 controller support on Switch, and dynamic button glyphs that adapt to whichever
 controller is in use.
 
-> **Status: the real engine boots, native ANIM sprites work, and the first native
-> HSF static-mesh/material-texture path runs in Eden.** The full visible game is
-> not finished: HSF animation/TEV materials, audio, saves, UI glyph integration,
+> **Status: the real engine boots, native ANIM sprites work, and native HSF
+> transform/material/texture paths run in Eden.** The full visible game is not
+> finished: HSF skinning/advanced materials, audio, saves, UI glyph integration,
 > and several overlays still need work.
 
 This repository contains **no game assets** — an existing, legally-obtained copy of
@@ -38,6 +38,8 @@ What works:
   draws static triangle/quad/strip meshes through the OpenGL path, including HSF
   bitmap/palette textures, depth testing, culling, blend state, transparency,
   and per-vertex colors.
+- Reads HSF transform tracks and advances the supported object animations at one
+  game tick per rendered frame. Envelope/cluster/shape animation is still off.
 - Provides real Switch system tick/time values and avoids the zero-byte audio
   staging allocation that corrupted the legacy heap.
 - Reads up to four Switch controller slots, including native GameCube and Pro
@@ -51,8 +53,9 @@ What works:
 What does **not** work yet:
 - Complete visible boot artwork and menus still need validation and cleanup on
   hardware. The 2D path is wired, but it is not a finished renderer.
-- HSF animation, lighting, multi-stage TEV materials, and complete 3D scene
-  rendering are not finished; no game board or minigame scene is validated yet.
+- HSF envelope/cluster/shape animation, lighting, multi-stage TEV materials, and
+  complete 3D scene rendering are not finished; no game board or minigame scene
+  is validated yet.
 - No audio or save data yet. Glyph lookup exists, but the original UI has not yet
   been fully wired to replace every on-screen button prompt.
 - Only `bootDll` is wired up; every other overlay currently stub-links and does
@@ -115,7 +118,8 @@ Everything platform-specific lives in `src/platform/switch/`:
 | `sys_switch.c` | The big "stub layer": minimal/no-op implementations of the GameCube `GX`, `VI`, `OS`, `PAD`, `Hu*` engine calls so the game links. This is where most future work replaces stubs with real behavior. |
 | `gfx_switch.c/.h` | EGL/GLES2 setup, framebuffer clear/present, 2D shader pipelines, and depth-tested 3D shader pipelines. |
 | `gx_gl.c` | The `GX → OpenGL` translation layer (compiled with `-DTARGET_PC`): matrix math, immediate-mode vertex/color capture, GameCube texture decoding, and GX raster-state translation. |
-| `hsf_switch.c` | Safe big-endian/32-bit-offset HSF conversion, static mesh drawing, material state, and bitmap/palette texture hookup. Animation and full TEV materials are future work. |
+| `hsf_switch.c` | Safe big-endian/32-bit-offset HSF conversion, mesh drawing, material state, bitmap/palette texture hookup, and guarded HSF motion-table conversion. |
+| `motion_switch.c` | Transform-track motion storage, curve evaluation, model animation timing, and motion-slot lifetime management. |
 | `dvd_switch.c` | Virtual DVD/FST: scans the asset folder and maps GameCube `DVD*` file calls to real files. Also hosts `OSReport` logging. |
 | `controller.c/.h` | libnx pad reading for four players, controller-type detection, and the controller-aware button-glyph lookup. |
 | `jmp_switch.s` | Small assembly shim. |
@@ -149,10 +153,10 @@ data that *contains pointer fields* therefore has a **mismatched layout** — fi
 after the first pointer land at the wrong offset, producing garbage and reads from
 near-null addresses.
 
-The sprite `ANIM` format and the static HSF geometry path are now handled by
-dedicated loaders. HSF motion, cluster, shape, and matrix sections still need
-the same treatment: parse their 32-bit file offsets, allocate native structures,
-and relocate the pointers explicitly.
+The sprite `ANIM` format and the HSF geometry/transform-track paths are now
+handled by dedicated loaders. HSF envelope, cluster, shape, matrix, and advanced
+material sections still need the same treatment: parse their 32-bit file
+offsets, allocate native structures, and relocate the pointers explicitly.
 
 **You cannot fix this by compiling 32-bit — Switch homebrew (libnx) is 64-bit
 only.** It has to be handled in software. Reasonable approaches:
