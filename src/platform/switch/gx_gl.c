@@ -1,6 +1,6 @@
 // GX -> OpenGL translation layer (compiled with TARGET_PC so the GX immediate
 // mode + texture calls become real functions instead of GameCube FIFO writes).
-// Scope: enough of GX to draw 2D sprites (sprput.c/sprman.c). 3D comes later.
+// Scope: enough of GX to draw 2D sprites and the current static HSF mesh slice.
 #ifdef __SWITCH__
 
 #include <dolphin/gx.h>
@@ -570,10 +570,15 @@ void GXInvalidateTexAll(void) {
 // Immediate-mode vertex capture
 // ---------------------------------------------------------------------------
 #define MAXV 64
-static float s_vClip[MAXV][2];
+static float s_vClip[MAXV][3];
 static float s_vUV[MAXV][2];
 static int s_vCount = 0;
 static int s_prim = 0;
+static BOOL s_3dMode = FALSE;
+
+void GXSet3DMode(u8 enable) {
+    s_3dMode = enable ? TRUE : FALSE;
+}
 
 void GXBegin(GXPrimitive type, GXVtxFmt fmt, u16 nverts) {
     (void)fmt; (void)nverts;
@@ -590,10 +595,12 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     // clip = proj * world
     float cx = s_proj[0][0]*ox + s_proj[0][1]*oy + s_proj[0][2]*oz + s_proj[0][3];
     float cy = s_proj[1][0]*ox + s_proj[1][1]*oy + s_proj[1][2]*oz + s_proj[1][3];
+    float cz = s_proj[2][0]*ox + s_proj[2][1]*oy + s_proj[2][2]*oz + s_proj[2][3];
     float cw = s_proj[3][0]*ox + s_proj[3][1]*oy + s_proj[3][2]*oz + s_proj[3][3];
     if (cw == 0.0f) cw = 1.0f;
     s_vClip[s_vCount][0] = cx / cw;
     s_vClip[s_vCount][1] = cy / cw;
+    s_vClip[s_vCount][2] = cz / cw;
     s_vUV[s_vCount][0] = 0.0f;
     s_vUV[s_vCount][1] = 0.0f;
     s_vCount++;
@@ -608,14 +615,18 @@ void GXTexCoord2f32(f32 s, f32 t) {
 void GXEnd(void) {
     if (s_vCount < 3) { s_vCount = 0; return; }
     // Expand quads (0,1,2,3) into two triangles (0,1,2)(0,2,3).
-    float clip[MAXV * 3 * 2];
+    float clipXY[MAXV * 3 * 2];
+    float clipXYZ[MAXV * 3 * 3];
     float uv[MAXV * 3 * 2];
     int n = 0;
     if (s_prim == GX_QUADS) {
         for (int q = 0; q + 3 < s_vCount; q += 4) {
             int idx[6] = { q, q+1, q+2, q, q+2, q+3 };
             for (int j = 0; j < 6; j++) {
-                clip[n*2+0] = s_vClip[idx[j]][0]; clip[n*2+1] = s_vClip[idx[j]][1];
+                clipXY[n*2+0] = s_vClip[idx[j]][0]; clipXY[n*2+1] = s_vClip[idx[j]][1];
+                clipXYZ[n*3+0] = s_vClip[idx[j]][0];
+                clipXYZ[n*3+1] = s_vClip[idx[j]][1];
+                clipXYZ[n*3+2] = s_vClip[idx[j]][2];
                 uv[n*2+0] = s_vUV[idx[j]][0];     uv[n*2+1] = s_vUV[idx[j]][1];
                 n++;
             }
@@ -623,7 +634,10 @@ void GXEnd(void) {
     } else if (s_prim == GX_TRIANGLES) {
         for (int q = 0; q + 2 < s_vCount; q += 3) {
             for (int k = 0; k < 3; k++) {
-                clip[n*2+0] = s_vClip[q+k][0]; clip[n*2+1] = s_vClip[q+k][1];
+                clipXY[n*2+0] = s_vClip[q+k][0]; clipXY[n*2+1] = s_vClip[q+k][1];
+                clipXYZ[n*3+0] = s_vClip[q+k][0];
+                clipXYZ[n*3+1] = s_vClip[q+k][1];
+                clipXYZ[n*3+2] = s_vClip[q+k][2];
                 uv[n*2+0] = s_vUV[q+k][0];     uv[n*2+1] = s_vUV[q+k][1];
                 n++;
             }
@@ -632,18 +646,31 @@ void GXEnd(void) {
         for (int j = 1; j + 1 < s_vCount; j++) {
             int idx[3] = { 0, j, j+1 };
             for (int k = 0; k < 3; k++) {
-                clip[n*2+0] = s_vClip[idx[k]][0]; clip[n*2+1] = s_vClip[idx[k]][1];
+                clipXY[n*2+0] = s_vClip[idx[k]][0]; clipXY[n*2+1] = s_vClip[idx[k]][1];
+                clipXYZ[n*3+0] = s_vClip[idx[k]][0];
+                clipXYZ[n*3+1] = s_vClip[idx[k]][1];
+                clipXYZ[n*3+2] = s_vClip[idx[k]][2];
                 uv[n*2+0] = s_vUV[idx[k]][0];     uv[n*2+1] = s_vUV[idx[k]][1];
                 n++;
             }
         }
     }
     if (s_curTex) {
-        Gfx2D_DrawTexTris(clip, uv, n, s_curTex,
-                          s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+        if (s_3dMode) {
+            Gfx3D_DrawTexTris(clipXYZ, uv, n, s_curTex,
+                              s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+        } else {
+            Gfx2D_DrawTexTris(clipXY, uv, n, s_curTex,
+                              s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+        }
     } else {
-        Gfx2D_DrawSolidTris(clip, n,
-                            s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+        if (s_3dMode) {
+            Gfx3D_DrawSolidTris(clipXYZ, n,
+                                s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+        } else {
+            Gfx2D_DrawSolidTris(clipXY, n,
+                                s_tint[0], s_tint[1], s_tint[2], s_tint[3]);
+        }
     }
     s_vCount = 0;
 }

@@ -14,9 +14,9 @@ controller support on Switch, and dynamic button glyphs that adapt to whichever
 controller is in use.
 
 > **Status: the real engine boots, native ANIM sprites work, and the first native
-> HSF static-mesh path runs in Eden.** The full visible game is not finished:
-> HSF animation/material textures, audio, saves, UI glyph integration, and
-> several overlays still need work.
+> HSF static-mesh/material-texture path runs in Eden.** The full visible game is
+> not finished: HSF animation/TEV materials, audio, saves, UI glyph integration,
+> and several overlays still need work.
 
 This repository contains **no game assets** — an existing, legally-obtained copy of
 the game is required to supply the data files.
@@ -35,7 +35,8 @@ What works:
 - Decodes the GameCube tiled 2D texture formats used by sprites, including C4/C8
   palettes and TLUT uploads, and sends textured quads through OpenGL.
 - Converts big-endian, 32-bit-offset HSF model tables into native structures and
-  draws the first static triangle/quad meshes through the OpenGL path.
+  draws static triangle/quad meshes through the OpenGL path, including the first
+  HSF bitmap/palette and depth-tested texture path.
 - Provides real Switch system tick/time values and avoids the zero-byte audio
   staging allocation that corrupted the legacy heap.
 - Reads up to four Switch controller slots, including native GameCube and Pro
@@ -49,7 +50,7 @@ What works:
 What does **not** work yet:
 - Complete visible boot artwork and menus still need validation and cleanup on
   hardware. The 2D path is wired, but it is not a finished renderer.
-- HSF animation, textured materials, depth/culling, and complete 3D scene
+- HSF animation, multi-stage TEV materials, culling, and complete 3D scene
   rendering are not finished; no game board or minigame scene is validated yet.
 - No audio or save data yet. Glyph lookup exists, but the original UI has not yet
   been fully wired to replace every on-screen button prompt.
@@ -113,7 +114,7 @@ Everything platform-specific lives in `src/platform/switch/`:
 | `sys_switch.c` | The big "stub layer": minimal/no-op implementations of the GameCube `GX`, `VI`, `OS`, `PAD`, `Hu*` engine calls so the game links. This is where most future work replaces stubs with real behavior. |
 | `gfx_switch.c/.h` | EGL/GLES2 setup, framebuffer clear/present, and the 2D shader pipelines (solid + textured). |
 | `gx_gl.c` | The `GX → OpenGL` translation layer (compiled with `-DTARGET_PC`): matrix math, immediate-mode vertex capture, GameCube texture decoding, and basic solid 3D draws. |
-| `hsf_switch.c` | Safe big-endian/32-bit-offset HSF conversion and the initial static mesh draw path. Animation, TEV materials, and bitmap uploads are future work. |
+| `hsf_switch.c` | Safe big-endian/32-bit-offset HSF conversion, static mesh drawing, and the first bitmap/material texture hookup. Animation and full TEV materials are future work. |
 | `dvd_switch.c` | Virtual DVD/FST: scans the asset folder and maps GameCube `DVD*` file calls to real files. Also hosts `OSReport` logging. |
 | `controller.c/.h` | libnx pad reading for four players, controller-type detection, and the controller-aware button-glyph lookup. |
 | `jmp_switch.s` | Small assembly shim. |
@@ -160,15 +161,15 @@ only.** It has to be handled in software. Reasonable approaches:
   file-struct pointer members as 32-bit offsets and keep the game heap inside the
   low 4 GB so addresses fit; access via base+offset.
 
-The next major step is completing HSF materials/textures and the real 3D
-depth/display-list translation layer.
+The next major step is completing HSF animation, multi-stage materials, culling,
+and the remaining 3D display-list translation layer.
 
 ---
 
 ## Roadmap (rough)
 1. Validate and finish the 2D sprite path on hardware.
-2. Finish HSF textures, materials, animation, and remaining format loaders.
-3. Flesh out the `GX → OpenGL` layer (depth, culling, TEV) for complete 3D scenes.
+2. Finish HSF animation, multi-stage materials, culling, and remaining loaders.
+3. Flesh out the remaining `GX → OpenGL` TEV/display-list behavior for complete 3D scenes.
 4. Audio and save data.
 5. Wire the dynamic glyph lookup through every original UI prompt.
 6. Statically wire the remaining overlays.

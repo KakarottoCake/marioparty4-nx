@@ -10,6 +10,8 @@
 #include "dolphin/gx/GXVert.h"
 #include "dolphin/os.h"
 
+extern void GXSet3DMode(u8 enable);
+
 /*
  * HSF files are PPC data.  Their pointer fields are 32-bit offsets and all
  * numeric fields are big-endian.  The Switch ABI has 64-bit pointers, so the
@@ -27,6 +29,7 @@
 #define SWITCH_HSF_MATERIAL_SIZE 0x3C
 #define SWITCH_HSF_ATTRIBUTE_SIZE 0x84
 #define SWITCH_HSF_BITMAP_SIZE 0x20
+#define SWITCH_HSF_PALETTE_SIZE 0x10
 #define SWITCH_HSF_BUFFER_SIZE 12
 #define SWITCH_HSF_MAX_DEPTH 128
 
@@ -84,6 +87,7 @@ typedef struct SwitchHsfContext_s {
     HSFMATERIAL *material;
     HSFATTRIBUTE *attribute;
     HSFBITMAP *bitmap;
+    HSFPALETTE *palette;
 } SwitchHsfContext;
 
 static u16 SwitchHsfBE16(const u8 *p) {
@@ -475,22 +479,163 @@ static HSFMATERIAL *SwitchHsfParseMaterials(SwitchHsfContext *ctx) {
         material->refAlpha = SwitchHsfF32(raw + 0x28);
         material->unk2C = SwitchHsfF32(raw + 0x2C);
         material->flags = SwitchHsfBE32(raw + 0x30);
-        /* The original attr pointer is a symbol-table offset.  Texture
-         * animation is not part of this first static-render slice. */
-        material->attrNum = 0;
+        material->attrNum = SwitchHsfBE32(raw + 0x34);
         material->attr = NULL;
+        if (material->attrNum != 0) {
+            u32 attrSymbol = SwitchHsfBE32(raw + 0x38);
+            u32 j;
+            if (material->attrNum > 256 ||
+                attrSymbol > ctx->header.section[SWITCH_HSF_SYMBOL].count ||
+                material->attrNum > ctx->header.section[SWITCH_HSF_SYMBOL].count - attrSymbol) {
+                return NULL;
+            }
+            material->attr = (s32 *)SwitchHsfArenaAlloc(
+                &ctx->arena, material->attrNum * sizeof(s32));
+            if (!material->attr) {
+                return NULL;
+            }
+            for (j = 0; j < material->attrNum; j++) {
+                u32 attrIndex;
+                if (!SwitchHsfSymbol(ctx, attrSymbol + j, &attrIndex) ||
+                    attrIndex >= ctx->header.section[SWITCH_HSF_ATTRIBUTE].count) {
+                    material->attr[j] = -1;
+                } else {
+                    material->attr[j] = (s32)attrIndex;
+                }
+            }
+        }
     }
     return materials;
+}
+
+static u32 SwitchHsfRoundUp(u32 value, u32 alignment) {
+    u32 remainder;
+    if (alignment == 0) {
+        return value;
+    }
+    remainder = value % alignment;
+    if (remainder != 0 && value > 0xFFFFFFFFU - (alignment - remainder)) {
+        return 0;
+    }
+    return value + (alignment - remainder) % alignment;
+}
+
+static u32 SwitchHsfBitmapBytes(u8 format, u8 pixSize, u32 width, u32 height) {
+    u32 tileWidth;
+    u32 tileHeight;
+    u32 bytesPerTile;
+
+    if (width == 0 || height == 0 || width > 4096 || height > 4096) {
+        return 0;
+    }
+    switch (format) {
+        case HSF_BMPFMT_RGBA8:
+            tileWidth = 4; tileHeight = 4; bytesPerTile = 64; break;
+        case HSF_BMPFMT_RGB565:
+        case HSF_BMPFMT_RGB5A3:
+        case HSF_BMPFMT_IA8:
+            tileWidth = 4; tileHeight = 4; bytesPerTile = 32; break;
+        case HSF_BMPFMT_I4:
+            tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
+        case HSF_BMPFMT_I8:
+        case HSF_BMPFMT_IA4:
+            tileWidth = 8; tileHeight = 4; bytesPerTile = 32; break;
+        case HSF_BMPFMT_CMPR:
+            tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
+        case HSF_BMPFMT_CI_RGB565:
+        case HSF_BMPFMT_CI_RGB5A3:
+        case HSF_BMPFMT_CI_IA8:
+            if (pixSize < 8) {
+                tileWidth = 8; tileHeight = 8; bytesPerTile = 32;
+            } else {
+                tileWidth = 8; tileHeight = 4; bytesPerTile = 32;
+            }
+            break;
+        default:
+            return 0;
+    }
+    width = SwitchHsfRoundUp(width, tileWidth);
+    height = SwitchHsfRoundUp(height, tileHeight);
+    if (width == 0 || height == 0 || height > 0xFFFFFFFFU / width ||
+        width * height > 0xFFFFFFFFU / bytesPerTile) {
+        return 0;
+    }
+    return (width / tileWidth) * (height / tileHeight) * bytesPerTile;
+}
+
+static HSFPALETTE *SwitchHsfParsePalettes(SwitchHsfContext *ctx) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_PALETTE];
+    HSFPALETTE *palettes;
+    u32 tableSize;
+    u32 dataBase;
+    u32 i;
+
+    if (section->count == 0) {
+        return NULL;
+    }
+    if (!SwitchHsfTableRange(ctx, SWITCH_HSF_PALETTE, SWITCH_HSF_PALETTE_SIZE) ||
+        section->count > 0xFFFFFFFFU / SWITCH_HSF_PALETTE_SIZE) {
+        return NULL;
+    }
+    tableSize = section->count * SWITCH_HSF_PALETTE_SIZE;
+    if (section->ofs > 0xFFFFFFFFU - tableSize) {
+        return NULL;
+    }
+    dataBase = section->ofs + tableSize;
+    if (!SwitchHsfRange(ctx, dataBase, 0)) {
+        return NULL;
+    }
+    palettes = (HSFPALETTE *)SwitchHsfArenaAlloc(
+        &ctx->arena, section->count * sizeof(HSFPALETTE));
+    if (!palettes) {
+        return NULL;
+    }
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs + i * SWITCH_HSF_PALETTE_SIZE;
+        HSFPALETTE *palette = &palettes[i];
+        u32 entries = SwitchHsfBE32(raw + 8);
+        u32 dataOfs = SwitchHsfBE32(raw + 12);
+        u32 byteCount;
+        void *destination;
+        if (entries > 0x10000U || entries > 0xFFFFFFFFU / 2U) {
+            return NULL;
+        }
+        byteCount = entries * 2;
+        if (dataOfs > ctx->rawSize - dataBase ||
+            !SwitchHsfRange(ctx, dataBase + dataOfs, byteCount)) {
+            return NULL;
+        }
+        destination = SwitchHsfArenaAlloc(&ctx->arena, byteCount ? byteCount : 1);
+        if (!destination) {
+            return NULL;
+        }
+        palette->name = SwitchHsfString(ctx, SwitchHsfBE32(raw));
+        palette->unk = SwitchHsfS32(raw + 4);
+        palette->palSize = entries;
+        palette->data = (u16 *)destination;
+        memcpy(destination, ctx->raw + dataBase + dataOfs, byteCount);
+    }
+    return palettes;
 }
 
 static HSFBITMAP *SwitchHsfParseBitmaps(SwitchHsfContext *ctx) {
     const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_BITMAP];
     HSFBITMAP *bitmaps;
+    u32 tableSize;
+    u32 dataBase;
     u32 i;
     if (section->count == 0) {
         return NULL;
     }
     if (!SwitchHsfTableRange(ctx, SWITCH_HSF_BITMAP, SWITCH_HSF_BITMAP_SIZE)) {
+        return NULL;
+    }
+    tableSize = section->count * SWITCH_HSF_BITMAP_SIZE;
+    if (section->ofs > 0xFFFFFFFFU - tableSize) {
+        return NULL;
+    }
+    dataBase = section->ofs + tableSize;
+    if (!SwitchHsfRange(ctx, dataBase, 0)) {
         return NULL;
     }
     bitmaps = (HSFBITMAP *)SwitchHsfArenaAlloc(
@@ -514,10 +659,35 @@ static HSFBITMAP *SwitchHsfParseBitmaps(SwitchHsfContext *ctx) {
         bitmap->tint.a = raw[19];
         bitmap->palData = NULL;
         bitmap->unk = SwitchHsfBE32(raw + 0x18);
-        /* Bitmap byte decoding is intentionally deferred.  A null texture
-         * falls back to the solid material path and cannot dereference the
-         * source model after it is released. */
-        bitmap->data = NULL;
+        if (ctx->palette) {
+            u32 paletteIndex = SwitchHsfBE32(raw + 0x14);
+            if (paletteIndex != 0xFFFFFFFFU &&
+                paletteIndex < ctx->header.section[SWITCH_HSF_PALETTE].count) {
+                bitmap->palData = ctx->palette[paletteIndex].data;
+            }
+        }
+        {
+            u32 byteCount = SwitchHsfBitmapBytes(
+                bitmap->dataFmt, bitmap->pixSize,
+                (u32)(bitmap->sizeX < 0 ? 0 : bitmap->sizeX),
+                (u32)(bitmap->sizeY < 0 ? 0 : bitmap->sizeY));
+            u32 dataOfs = SwitchHsfBE32(raw + 0x1C);
+            void *destination;
+            if (byteCount == 0) {
+                bitmap->data = NULL;
+            } else {
+                if (dataOfs > ctx->rawSize - dataBase ||
+                    !SwitchHsfRange(ctx, dataBase + dataOfs, byteCount)) {
+                    return NULL;
+                }
+                destination = SwitchHsfArenaAlloc(&ctx->arena, byteCount);
+                if (!destination) {
+                    return NULL;
+                }
+                memcpy(destination, ctx->raw + dataBase + dataOfs, byteCount);
+                bitmap->data = destination;
+            }
+        }
     }
     return bitmaps;
 }
@@ -750,6 +920,106 @@ static BOOL SwitchHsfEstimateAdd(u32 *total, u32 count, u32 size) {
     return TRUE;
 }
 
+static BOOL SwitchHsfEstimateMaterials(const SwitchHsfContext *ctx, u32 *total) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_MATERIAL];
+    u32 i;
+    if (section->count == 0) {
+        return TRUE;
+    }
+    if (!SwitchHsfTableRange(ctx, SWITCH_HSF_MATERIAL, SWITCH_HSF_MATERIAL_SIZE) ||
+        !SwitchHsfEstimateAdd(total, section->count, sizeof(HSFMATERIAL))) {
+        return FALSE;
+    }
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs + i * SWITCH_HSF_MATERIAL_SIZE;
+        u32 attrNum = SwitchHsfBE32(raw + 0x34);
+        u32 attrSymbol = SwitchHsfBE32(raw + 0x38);
+        if (attrNum > 256 ||
+            (attrNum != 0 &&
+             (attrSymbol > ctx->header.section[SWITCH_HSF_SYMBOL].count ||
+              attrNum > ctx->header.section[SWITCH_HSF_SYMBOL].count - attrSymbol)) ||
+            !SwitchHsfEstimateAdd(total, attrNum, sizeof(s32))) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL SwitchHsfEstimatePalettes(const SwitchHsfContext *ctx, u32 *total) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_PALETTE];
+    u32 tableSize;
+    u32 dataBase;
+    u32 i;
+    if (section->count == 0) {
+        return TRUE;
+    }
+    if (!SwitchHsfTableRange(ctx, SWITCH_HSF_PALETTE, SWITCH_HSF_PALETTE_SIZE) ||
+        section->count > 0xFFFFFFFFU / SWITCH_HSF_PALETTE_SIZE) {
+        return FALSE;
+    }
+    tableSize = section->count * SWITCH_HSF_PALETTE_SIZE;
+    if (section->ofs > 0xFFFFFFFFU - tableSize) {
+        return FALSE;
+    }
+    dataBase = section->ofs + tableSize;
+    if (!SwitchHsfRange(ctx, dataBase, 0) ||
+        !SwitchHsfEstimateAdd(total, section->count, sizeof(HSFPALETTE))) {
+        return FALSE;
+    }
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs + i * SWITCH_HSF_PALETTE_SIZE;
+        u32 entries = SwitchHsfBE32(raw + 8);
+        u32 dataOfs = SwitchHsfBE32(raw + 12);
+        u32 bytes;
+        if (entries > 0x10000U || entries > 0xFFFFFFFFU / 2U) {
+            return FALSE;
+        }
+        bytes = entries * 2;
+        if (dataOfs > ctx->rawSize - dataBase ||
+            !SwitchHsfRange(ctx, dataBase + dataOfs, bytes) ||
+            !SwitchHsfEstimateAdd(total, 1, bytes ? bytes : 1)) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL SwitchHsfEstimateBitmaps(const SwitchHsfContext *ctx, u32 *total) {
+    const SwitchHsfSection *section = &ctx->header.section[SWITCH_HSF_BITMAP];
+    u32 tableSize;
+    u32 dataBase;
+    u32 i;
+    if (section->count == 0) {
+        return TRUE;
+    }
+    if (!SwitchHsfTableRange(ctx, SWITCH_HSF_BITMAP, SWITCH_HSF_BITMAP_SIZE) ||
+        section->count > 0xFFFFFFFFU / SWITCH_HSF_BITMAP_SIZE) {
+        return FALSE;
+    }
+    tableSize = section->count * SWITCH_HSF_BITMAP_SIZE;
+    if (section->ofs > 0xFFFFFFFFU - tableSize) {
+        return FALSE;
+    }
+    dataBase = section->ofs + tableSize;
+    if (!SwitchHsfRange(ctx, dataBase, 0) ||
+        !SwitchHsfEstimateAdd(total, section->count, sizeof(HSFBITMAP))) {
+        return FALSE;
+    }
+    for (i = 0; i < section->count; i++) {
+        const u8 *raw = ctx->raw + section->ofs + i * SWITCH_HSF_BITMAP_SIZE;
+        u32 bytes = SwitchHsfBitmapBytes(raw[8], raw[9],
+                                         SwitchHsfS16(raw + 10) < 0 ? 0 : SwitchHsfS16(raw + 10),
+                                         SwitchHsfS16(raw + 12) < 0 ? 0 : SwitchHsfS16(raw + 12));
+        u32 dataOfs = SwitchHsfBE32(raw + 0x1C);
+        if (bytes != 0 && (dataOfs > ctx->rawSize - dataBase ||
+                           !SwitchHsfRange(ctx, dataBase + dataOfs, bytes) ||
+                           !SwitchHsfEstimateAdd(total, 1, bytes))) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL SwitchHsfEstimateBuffers(const SwitchHsfContext *ctx, s32 sectionId,
                                      u32 elementSize, u32 *total) {
     const SwitchHsfSection *section = &ctx->header.section[sectionId];
@@ -839,12 +1109,11 @@ static BOOL SwitchHsfEstimateArena(const SwitchHsfContext *ctx, u32 *total) {
     *total += ctx->header.section[SWITCH_HSF_STRING].count;
     if (!SwitchHsfEstimateAdd(total, ctx->header.section[SWITCH_HSF_SCENE].count,
                                sizeof(HSFSCENE)) ||
-        !SwitchHsfEstimateAdd(total, ctx->header.section[SWITCH_HSF_MATERIAL].count,
-                               sizeof(HSFMATERIAL)) ||
+        !SwitchHsfEstimateMaterials(ctx, total) ||
         !SwitchHsfEstimateAdd(total, ctx->header.section[SWITCH_HSF_ATTRIBUTE].count,
                                sizeof(HSFATTRIBUTE)) ||
-        !SwitchHsfEstimateAdd(total, ctx->header.section[SWITCH_HSF_BITMAP].count,
-                               sizeof(HSFBITMAP)) ||
+        !SwitchHsfEstimatePalettes(ctx, total) ||
+        !SwitchHsfEstimateBitmaps(ctx, total) ||
         !SwitchHsfEstimateBuffers(ctx, SWITCH_HSF_VERTEX, 12, total) ||
         !SwitchHsfEstimateNormals(ctx, total) ||
         !SwitchHsfEstimateBuffers(ctx, SWITCH_HSF_ST, 8, total) ||
@@ -943,6 +1212,7 @@ void *LoadHSF(void *data) {
     }
 
     scene = SwitchHsfParseScene(&ctx);
+    ctx.palette = SwitchHsfParsePalettes(&ctx);
     ctx.material = SwitchHsfParseMaterials(&ctx);
     ctx.bitmap = SwitchHsfParseBitmaps(&ctx);
     ctx.attribute = SwitchHsfParseAttributes(&ctx);
@@ -953,6 +1223,7 @@ void *LoadHSF(void *data) {
     ctx.face = SwitchHsfParseFaces(&ctx);
     if ((ctx.header.section[SWITCH_HSF_SCENE].count && !scene) ||
         (ctx.header.section[SWITCH_HSF_MATERIAL].count && !ctx.material) ||
+        (ctx.header.section[SWITCH_HSF_PALETTE].count && !ctx.palette) ||
         (ctx.header.section[SWITCH_HSF_BITMAP].count && !ctx.bitmap) ||
         (ctx.header.section[SWITCH_HSF_ATTRIBUTE].count && !ctx.attribute) ||
         (ctx.header.section[SWITCH_HSF_VERTEX].count && !ctx.vertex) ||
@@ -968,6 +1239,8 @@ void *LoadHSF(void *data) {
     model->materialNum = (s16)ctx.header.section[SWITCH_HSF_MATERIAL].count;
     model->bitmap = ctx.bitmap;
     model->bitmapNum = (s16)ctx.header.section[SWITCH_HSF_BITMAP].count;
+    model->palette = ctx.palette;
+    model->paletteNum = (s16)ctx.header.section[SWITCH_HSF_PALETTE].count;
     model->attribute = ctx.attribute;
     model->attributeNum = (s16)ctx.header.section[SWITCH_HSF_ATTRIBUTE].count;
     model->vertex = ctx.vertex;
@@ -1052,6 +1325,111 @@ static void SwitchHsfSetMaterial(const HSFOBJECT *object, s16 matIndex,
     GXSetChanMatColor(GX_COLOR0A0, color);
 }
 
+static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
+                                s16 materialCount) {
+    GXTexObj texObj;
+    GXTlutObj tlutObj;
+    HSFMATERIAL *material;
+    HSFATTRIBUTE *attribute;
+    HSFBITMAP *bitmap;
+    GXTlutFmt tlutFormat;
+    GXCITexFmt ciFormat;
+    u32 attrIndex;
+    BOOL indexed = FALSE;
+
+    GXInvalidateTexAll();
+    if (!object || !object->mesh.material || !object->mesh.attribute ||
+        matIndex < 0 || matIndex >= materialCount || matIndex >= 0x1000) {
+        return;
+    }
+    material = &object->mesh.material[matIndex];
+    if (material->attrNum == 0 || !material->attr ||
+        material->attr[0] < 0) {
+        return;
+    }
+    attrIndex = (u32)material->attr[0];
+    if (attrIndex >= 0x1000) {
+        return;
+    }
+    attribute = &object->mesh.attribute[attrIndex];
+    bitmap = attribute->bitmap;
+    if (!bitmap || !bitmap->data || bitmap->sizeX <= 0 || bitmap->sizeY <= 0) {
+        return;
+    }
+
+    switch (bitmap->dataFmt) {
+        case HSF_BMPFMT_RGBA8:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_RGBA8, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_RGB565:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_RGB565, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_RGB5A3:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_RGB5A3, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_I4:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_I4, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_I8:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_I8, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_IA4:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_IA4, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_IA8:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_IA8, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_CMPR:
+            GXInitTexObj(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                         GX_TF_CMPR, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                         attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE);
+            break;
+        case HSF_BMPFMT_CI_RGB565:
+            indexed = TRUE;
+            tlutFormat = GX_TL_RGB565;
+            ciFormat = bitmap->pixSize < 8 ? GX_TF_C4 : GX_TF_C8;
+            break;
+        case HSF_BMPFMT_CI_RGB5A3:
+            indexed = TRUE;
+            tlutFormat = GX_TL_RGB5A3;
+            ciFormat = bitmap->pixSize < 8 ? GX_TF_C4 : GX_TF_C8;
+            break;
+        case HSF_BMPFMT_CI_IA8:
+            indexed = TRUE;
+            tlutFormat = GX_TL_IA8;
+            ciFormat = bitmap->pixSize < 8 ? GX_TF_C4 : GX_TF_C8;
+            break;
+        default:
+            return;
+    }
+    if (indexed) {
+        if (!bitmap->palData || bitmap->palSize <= 0) {
+            return;
+        }
+        GXInitTlutObj(&tlutObj, bitmap->palData, tlutFormat,
+                      (u16)bitmap->palSize);
+        GXLoadTlut(&tlutObj, 0);
+        GXInitTexObjCI(&texObj, bitmap->data, bitmap->sizeX, bitmap->sizeY,
+                       ciFormat, attribute->wrapS ? GX_REPEAT : GX_CLAMP,
+                       attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE, 0);
+    }
+    GXLoadTexObj(&texObj, GX_TEXMAP0);
+}
+
 static void SwitchHsfEmitVertex(const HSFOBJECT *object, const HSFFACE *face,
                                 s32 corner) {
     s32 vertexIndex = face->indices[corner][0];
@@ -1064,6 +1442,13 @@ static void SwitchHsfEmitVertex(const HSFOBJECT *object, const HSFFACE *face,
         const HuVecF *vertex = (const HuVecF *)object->mesh.vertex->data;
         GXPosition3f32(vertex[vertexIndex].x, vertex[vertexIndex].y,
                        vertex[vertexIndex].z);
+    }
+    if (object->mesh.st && object->mesh.st->data &&
+        face->indices[corner][2] >= 0 &&
+        face->indices[corner][2] < object->mesh.st->count) {
+        const HuVec2f *st = (const HuVec2f *)object->mesh.st->data;
+        GXTexCoord2f32(st[face->indices[corner][2]].x,
+                       st[face->indices[corner][2]].y);
     }
 }
 
@@ -1103,6 +1488,7 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount) {
             currentType = type;
             currentMat = face->mat;
             SwitchHsfSetMaterial(object, currentMat & 0x0FFF, materialCount);
+            SwitchHsfSetTexture(object, currentMat & 0x0FFF, materialCount);
             GXBegin(type == HSF_FACE_QUAD ? GX_QUADS : GX_TRIANGLES,
                     GX_VTXFMT0, 0);
             open = TRUE;
@@ -1125,6 +1511,7 @@ void Hu3DDraw(HU3DMODEL *modelP, Mtx mtx, Vec *scale) {
         return;
     }
     model = modelP->hsf;
+    GXSet3DMode(TRUE);
     GXInvalidateTexAll();
     for (i = 0; i < model->objectNum; i++) {
         HSFOBJECT *object = &model->object[i];
@@ -1137,6 +1524,7 @@ void Hu3DDraw(HU3DMODEL *modelP, Mtx mtx, Vec *scale) {
         GXLoadPosMtxImm(objectMatrix, 0);
         SwitchHsfRenderFaces(object, model->materialNum);
     }
+    GXSet3DMode(FALSE);
 }
 
 #endif

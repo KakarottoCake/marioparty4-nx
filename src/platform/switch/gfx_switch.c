@@ -26,6 +26,7 @@ static GLint  s_locColor = -1;  // uniform: solid color
 extern void OSReport(const char* msg, ...);  // engine logger (goes to SD log)
 
 static void GfxInitTex(void);  // defined later (textured pipeline)
+static void GfxInit3DTex(void);  // defined later (depth-tested textured path)
 
 static const char* kVert2D =
     "attribute vec2 aPos;\n"
@@ -35,6 +36,38 @@ static const char* kFrag2D =
     "precision mediump float;\n"
     "uniform vec4 uColor;\n"
     "void main() { gl_FragColor = uColor; }\n";
+
+// HSF's first native draw path uses the same solid-color material fallback as
+// the 2D path, but keeps clip-space Z so nearer triangles hide farther ones.
+static GLuint s_prog3d = 0;
+static GLint s_loc3dPos = -1;
+static GLint s_loc3dColor = -1;
+
+static const char* kVert3D =
+    "attribute vec3 aPos;\n"
+    "void main() { gl_Position = vec4(aPos, 1.0); }\n";
+
+static const char* kFrag3D =
+    "precision mediump float;\n"
+    "uniform vec4 uColor;\n"
+    "void main() { gl_FragColor = uColor; }\n";
+
+static GLuint s_prog3dTex = 0;
+static GLint s_3dTexLocPos = -1, s_3dTexLocUV = -1;
+static GLint s_3dTexLocTint = -1, s_3dTexLocSampler = -1;
+
+static const char* kVert3DTex =
+    "attribute vec3 aPos;\n"
+    "attribute vec2 aUV;\n"
+    "varying vec2 vUV;\n"
+    "void main() { vUV = aUV; gl_Position = vec4(aPos, 1.0); }\n";
+
+static const char* kFrag3DTex =
+    "precision mediump float;\n"
+    "varying vec2 vUV;\n"
+    "uniform sampler2D uTex;\n"
+    "uniform vec4 uTint;\n"
+    "void main() { gl_FragColor = texture2D(uTex, vUV) * uTint; }\n";
 
 static GLuint CompileShader(GLenum type, const char* src) {
     GLuint sh = glCreateShader(type);
@@ -75,6 +108,31 @@ static void GfxInit2D(void) {
     s_locPos = glGetAttribLocation(s_prog2d, "aPos");
     s_locColor = glGetUniformLocation(s_prog2d, "uColor");
     OSReport("Gfx: 2D shader pipeline ready\n");
+}
+
+static void GfxInit3D(void) {
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, kVert3D);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFrag3D);
+    if (!vs || !fs) return;
+    s_prog3d = glCreateProgram();
+    glAttachShader(s_prog3d, vs);
+    glAttachShader(s_prog3d, fs);
+    glBindAttribLocation(s_prog3d, 0, "aPos");
+    glLinkProgram(s_prog3d);
+    GLint ok = 0;
+    glGetProgramiv(s_prog3d, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        OSReport("Gfx: 3D program link failed\n");
+        s_prog3d = 0;
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        return;
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    s_loc3dPos = glGetAttribLocation(s_prog3d, "aPos");
+    s_loc3dColor = glGetUniformLocation(s_prog3d, "uColor");
+    OSReport("Gfx: solid 3D pipeline ready\n");
 }
 
 int GfxInit(void)
@@ -143,6 +201,8 @@ int GfxInit(void)
     eglMakeCurrent(s_display, s_surface, s_surface, s_context);
     GfxInit2D();
     GfxInitTex();
+    GfxInit3D();
+    GfxInit3DTex();
     return 1;
 }
 
@@ -154,6 +214,7 @@ static float ScreenToClipY(float y) { return 1.0f - (y / 240.0f); }
 void Gfx2D_DrawQuad(float x0, float y0, float x1, float y1,
                     float r, float g, float b, float a) {
     if (s_prog2d == 0) return;
+    glDisable(GL_DEPTH_TEST);
     float cx0 = ScreenToClipX(x0), cy0 = ScreenToClipY(y0);
     float cx1 = ScreenToClipX(x1), cy1 = ScreenToClipY(y1);
     const GLfloat verts[] = {
@@ -204,6 +265,34 @@ static void GfxInitTex(void) {
     OSReport("Gfx: textured pipeline ready\n");
 }
 
+static void GfxInit3DTex(void) {
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, kVert3DTex);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFrag3DTex);
+    if (!vs || !fs) return;
+    s_prog3dTex = glCreateProgram();
+    glAttachShader(s_prog3dTex, vs);
+    glAttachShader(s_prog3dTex, fs);
+    glBindAttribLocation(s_prog3dTex, 0, "aPos");
+    glBindAttribLocation(s_prog3dTex, 1, "aUV");
+    glLinkProgram(s_prog3dTex);
+    GLint ok = 0;
+    glGetProgramiv(s_prog3dTex, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        OSReport("Gfx: 3D texture program link failed\n");
+        s_prog3dTex = 0;
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        return;
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    s_3dTexLocPos = glGetAttribLocation(s_prog3dTex, "aPos");
+    s_3dTexLocUV = glGetAttribLocation(s_prog3dTex, "aUV");
+    s_3dTexLocTint = glGetUniformLocation(s_prog3dTex, "uTint");
+    s_3dTexLocSampler = glGetUniformLocation(s_prog3dTex, "uTex");
+    OSReport("Gfx: depth-tested textured pipeline ready\n");
+}
+
 unsigned int GfxCreateTexture(int w, int h, const void* rgba) {
     GLuint tex = 0;
     glGenTextures(1, &tex);
@@ -225,6 +314,7 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
                        unsigned int tex, float r, float g, float b, float a) {
     if (s_progTex == 0) return;
     glUseProgram(s_progTex);
+    glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glActiveTexture(GL_TEXTURE0);
@@ -240,16 +330,59 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
     glDisableVertexAttribArray(s_texLocUV);
 }
 
+void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv, int count,
+                       unsigned int tex, float r, float g, float b, float a) {
+    if (s_prog3dTex == 0 || !clipXYZ || !uv || count <= 0) return;
+    glUseProgram(s_prog3dTex);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
+    glUniform1i(s_3dTexLocSampler, 0);
+    glUniform4f(s_3dTexLocTint, r, g, b, a);
+    glEnableVertexAttribArray(s_3dTexLocPos);
+    glVertexAttribPointer(s_3dTexLocPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
+    glEnableVertexAttribArray(s_3dTexLocUV);
+    glVertexAttribPointer(s_3dTexLocUV, 2, GL_FLOAT, GL_FALSE, 0, uv);
+    glDrawArrays(GL_TRIANGLES, 0, count);
+    glDisableVertexAttribArray(s_3dTexLocPos);
+    glDisableVertexAttribArray(s_3dTexLocUV);
+}
+
 void Gfx2D_DrawSolidTris(const float* clipXY, int count,
                          float r, float g, float b, float a) {
     if (s_prog2d == 0 || !clipXY || count <= 0) return;
     glUseProgram(s_prog2d);
+    glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glUniform4f(s_locColor, r, g, b, a);
     glEnableVertexAttribArray(s_locPos);
     glVertexAttribPointer(s_locPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
     glDrawArrays(GL_TRIANGLES, 0, count);
     glDisableVertexAttribArray(s_locPos);
+}
+
+void Gfx3D_DrawSolidTris(const float* clipXYZ, int count,
+                         float r, float g, float b, float a) {
+    if (s_prog3d == 0 || !clipXYZ || count <= 0) return;
+    glUseProgram(s_prog3d);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
+    if (a < 0.999f) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        glDisable(GL_BLEND);
+    }
+    glUniform4f(s_loc3dColor, r, g, b, a);
+    glEnableVertexAttribArray(s_loc3dPos);
+    glVertexAttribPointer(s_loc3dPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
+    glDrawArrays(GL_TRIANGLES, 0, count);
+    glDisableVertexAttribArray(s_loc3dPos);
 }
 
 void GfxDebugDrawTest(void) {
@@ -270,6 +403,8 @@ void GfxBeginFrame(void)
     if (s_display == EGL_NO_DISPLAY) {
         return;
     }
+    glDepthMask(GL_TRUE);
+    glClearDepthf(1.0f);
     glClearColor(s_clearR, s_clearG, s_clearB, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
