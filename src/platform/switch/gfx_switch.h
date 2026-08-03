@@ -4,9 +4,6 @@
 #ifdef __SWITCH__
 
 // Rendering backend (EGL + OpenGL ES 2) for the Switch port.
-// Milestone 1: bring up a real window/context and present frames.
-// The GameCube GX draw calls are still stubbed; for now we only honor the
-// screen clear color so the game's per-frame background actually shows.
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +39,11 @@ void GfxDeleteTexture(unsigned int tex);
 // 'count' is the number of vertices (must be a multiple of 3).
 void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
                        unsigned int tex, float r, float g, float b, float a);
+
+// Draw triangles in clip space without sampling a texture.  This is used by
+// the first native HSF mesh path, where materials are currently solid-color.
+void Gfx2D_DrawSolidTris(const float* clipXY, int count,
+                         float r, float g, float b, float a);
 
 // Tear down the GL context.
 void GfxExit(void);

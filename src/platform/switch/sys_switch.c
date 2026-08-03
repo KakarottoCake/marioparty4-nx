@@ -120,9 +120,6 @@ void Hu3DAnimExec(void) {}
 void Hu3DMotionExec(void) {}
 void Hu3DSubMotionExec(void) {}
 void GXInvalidateVtxCache(void) {}
-void mtxRot(void* m, char axis, float deg) {}
-void mtxScaleCat(void* dest, void* src, float x, float y, float z) {}
-void Hu3DDraw(void) {}
 void GXWaitDrawDone(void) {}
 void ClusterMotionExec(void) {}
 void GXSetDrawDone(void) {}
@@ -166,20 +163,16 @@ void GXSetTevIndTile(s32 stage, s32 ind_stage, u16 w, u16 h, u16 tw, u16 th, s32
 void GXSetTexCoordGen2(s32 dst_coord, s32 func, s32 src, u32 mtx, u32 normalize, u32 pt_mtx) {}
 void GXSetTexCoordScaleManually(s32 coord, u8 enable, u16 scale_s, u16 scale_t) {}
 void GXInitTexObjLOD(void* obj, s32 minf, s32 magf, float minlod, float maxlod, float lodbias, u8 biasclamp, u8 edgelod, s32 maxaniso) {}
-void GXInvalidateTexAll(void) {}
 void GXSetViewportJitter(float left, float top, float width, float height, float nearZ, float farZ, u32 field) {}
 void GXSetTexCopySrc(u32 x, u32 y, u32 w, u32 h) {}
 void GXSetTexCopyDst(u32 w, u32 h, u32 fmt, u8 mip) {}
 void GXSetCurrentMtx(u32 id) {}
-void C_MTXLookAt(void* m, const void* camPos, const void* camUp, const void* target) {}
-void PSMTXInvXpose(const void* src, void* dest) {}
 void Hu3DDrawPreInit(void) {}
 
 // Missing stubs from latest build check
 void Hu3DAnimInit(void) {}
 void Hu3DParManInit(void) {}
 void GXSetCopyClear(GXColor color, u32 clear_z) { s_bgColor = color; }
-void C_MTXPerspective(void* m, float fovY, float aspect, float near, float far) {}
 void GXCopyTex(u32 dest_addr, u8 clear) {}
 
 // Performance metrics counters
@@ -255,41 +248,7 @@ void* GXNtsc480Prog = NULL;
 void VIConfigure(void* mode) {}
 void VIFlush(void) {}
 
-// HSF and Motion stubs for hsfman.c
-static void SwitchModelRawFree(void *data) {
-    uintptr_t address;
-    s32 i;
-    if (!data) {
-        return;
-    }
-    address = (uintptr_t)data;
-    for (i = 0; i < HEAP_MAX; i++) {
-        uintptr_t start = (uintptr_t)HuMemHeapPtrGet((HeapID)i);
-        uintptr_t end = start + HuMemHeapSizeGet((HeapID)i);
-        if (start != 0 && address > start && address < end) {
-            HuMemDirectFree(data);
-            return;
-        }
-    }
-}
-
-void* LoadHSF(void* data) {
-    void *model;
-    if (!data) {
-        return NULL;
-    }
-    /* HSFDATA is 208 bytes on the Switch ABI.  Keep this stub independent of
-     * the full HSF header so the legacy GX declarations remain untouched. */
-    model = HuMemDirectMalloc(HEAP_MODEL, 256);
-    if (!model) {
-        SwitchModelRawFree(data);
-        return NULL;
-    }
-    memset(model, 0, 256);
-    SwitchModelRawFree(data);
-    return model;
-}
-void MakeDisplayList(void* model) {}
+// HSF loading and the basic static draw path live in hsf_switch.c.
 s32 Hu3DMotionModelCreate(void* model) { return 0; }
 float Hu3DMotionMaxTimeGet(s32 id) { return 0.0f; }
 void Hu3DMotionClusterSet(s32 model, s32 motion) {}

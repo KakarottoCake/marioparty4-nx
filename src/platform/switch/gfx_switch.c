@@ -240,6 +240,18 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
     glDisableVertexAttribArray(s_texLocUV);
 }
 
+void Gfx2D_DrawSolidTris(const float* clipXY, int count,
+                         float r, float g, float b, float a) {
+    if (s_prog2d == 0 || !clipXY || count <= 0) return;
+    glUseProgram(s_prog2d);
+    glDisable(GL_BLEND);
+    glUniform4f(s_locColor, r, g, b, a);
+    glEnableVertexAttribArray(s_locPos);
+    glVertexAttribPointer(s_locPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
+    glDrawArrays(GL_TRIANGLES, 0, count);
+    glDisableVertexAttribArray(s_locPos);
+}
+
 void GfxDebugDrawTest(void) {
     // A magenta rectangle in the middle of the screen. If this shows, the
     // whole GL render path (context, shaders, present) is working.
