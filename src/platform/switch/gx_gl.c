@@ -642,7 +642,24 @@ void GXEnd(void) {
                 n++;
             }
         }
-    } else {  // treat triangle strips/fans as a fan from vertex 0
+    } else if (s_prim == GX_TRIANGLESTRIP) {
+        for (int j = 0; j + 2 < s_vCount; j++) {
+            int idx[3];
+            if (j & 1) {
+                idx[0] = j + 1; idx[1] = j; idx[2] = j + 2;
+            } else {
+                idx[0] = j; idx[1] = j + 1; idx[2] = j + 2;
+            }
+            for (int k = 0; k < 3; k++) {
+                clipXY[n*2+0] = s_vClip[idx[k]][0]; clipXY[n*2+1] = s_vClip[idx[k]][1];
+                clipXYZ[n*3+0] = s_vClip[idx[k]][0];
+                clipXYZ[n*3+1] = s_vClip[idx[k]][1];
+                clipXYZ[n*3+2] = s_vClip[idx[k]][2];
+                uv[n*2+0] = s_vUV[idx[k]][0];     uv[n*2+1] = s_vUV[idx[k]][1];
+                n++;
+            }
+        }
+    } else {  // treat other unsupported primitives as a fan from vertex 0
         for (int j = 1; j + 1 < s_vCount; j++) {
             int idx[3] = { 0, j, j+1 };
             for (int k = 0; k < 3; k++) {
