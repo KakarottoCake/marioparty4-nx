@@ -115,6 +115,11 @@ SD card drive letter, and confirm it. It creates `SD:/switch/`, copies the NRO,
 and copies the loose game files when they are available. The script never
 downloads or supplies game assets.
 
+On macOS, use `deploy_to_sd.command` instead. Double-clicking it opens Finder
+pickers for the extracted game files and mounted SD card. If macOS blocks the
+first launch, run `chmod +x deploy_to_sd.command deploy_to_sd.sh` in Terminal,
+then double-click the `.command` file again.
+
 ### Logs
 Engine `OSReport` output is routed to (1) the system debug log
 (`svcOutputDebugString`) — visible in Ryujinx and Eden's log window — and (2) a
