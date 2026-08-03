@@ -41,8 +41,16 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
                        unsigned int tex, float r, float g, float b, float a);
 
 // Textured triangles with full clip-space XYZ coordinates and depth testing.
-void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv, int count,
-                       unsigned int tex, float r, float g, float b, float a);
+void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
+                       const float* color, int count, unsigned int tex,
+                       float r, float g, float b, float a);
+
+// GX-compatible 3D state used by the native HSF renderer.  The arguments use
+// the numeric values from GXEnum.h, but keeping this small API independent of
+// GX headers avoids pulling the full GX interface into the EGL backend.
+void Gfx3D_SetCullMode(int mode);
+void Gfx3D_SetDepthMode(int enable, int func, int update);
+void Gfx3D_SetBlendMode(int mode, int src, int dst, int op);
 
 // Draw triangles in clip space without sampling a texture.  This is used by
 // the first native HSF mesh path, where materials are currently solid-color.
@@ -51,7 +59,7 @@ void Gfx2D_DrawSolidTris(const float* clipXY, int count,
 
 // Draw solid triangles with full OpenGL clip-space XYZ coordinates and depth
 // testing.  This is used by the native HSF mesh path.
-void Gfx3D_DrawSolidTris(const float* clipXYZ, int count,
+void Gfx3D_DrawSolidTris(const float* clipXYZ, const float* color, int count,
                          float r, float g, float b, float a);
 
 // Tear down the GL context.
