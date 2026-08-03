@@ -200,6 +200,8 @@ typedef struct {
     int palette_fmt;
     int palette_entries;
     u32 tlut;
+    int wrap_s;
+    int wrap_t;
 } MyTexObj;
 
 typedef struct {
@@ -232,6 +234,8 @@ static struct {
     const void* palette;
     int fmt;
     int palette_fmt;
+    int wrap_s;
+    int wrap_t;
     unsigned int tex;
 } s_texCache[TEXCACHE_MAX];
 static int s_texCacheN = 0;
@@ -476,7 +480,9 @@ static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
         if (s_texCache[i].key == obj->data &&
             s_texCache[i].palette == obj->palette &&
             s_texCache[i].fmt == obj->fmt &&
-            s_texCache[i].palette_fmt == obj->palette_fmt) {
+            s_texCache[i].palette_fmt == obj->palette_fmt &&
+            s_texCache[i].wrap_s == obj->wrap_s &&
+            s_texCache[i].wrap_t == obj->wrap_t) {
             return s_texCache[i].tex;
         }
 
@@ -484,12 +490,15 @@ static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
     if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return 0;
     static unsigned char buf[1024 * 1024 * 4];
     DecodeGCTexture(obj->fmt, (const unsigned char*)obj->data, w, h, obj, buf);
-    unsigned int tex = GfxCreateTexture(w, h, buf);
+    unsigned int tex = GfxCreateTexture(w, h, buf,
+                                        obj->wrap_s, obj->wrap_t);
     if (s_texCacheN < TEXCACHE_MAX) {
         s_texCache[s_texCacheN].key = obj->data;
         s_texCache[s_texCacheN].palette = obj->palette;
         s_texCache[s_texCacheN].fmt = obj->fmt;
         s_texCache[s_texCacheN].palette_fmt = obj->palette_fmt;
+        s_texCache[s_texCacheN].wrap_s = obj->wrap_s;
+        s_texCache[s_texCacheN].wrap_t = obj->wrap_t;
         s_texCache[s_texCacheN].tex = tex;
         s_texCacheN++;
     }
@@ -498,7 +507,7 @@ static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
 
 void GXInitTexObj(GXTexObj* obj, void* image_ptr, u16 width, u16 height,
                   GXTexFmt format, GXTexWrapMode wrap_s, GXTexWrapMode wrap_t, u8 mip) {
-    (void)wrap_s; (void)wrap_t; (void)mip;
+    (void)mip;
     MyTexObj* t = GetTexObjState(obj);
     if (!t) return;
     t->data = image_ptr;
@@ -509,11 +518,13 @@ void GXInitTexObj(GXTexObj* obj, void* image_ptr, u16 width, u16 height,
     t->palette_fmt = GX_TL_RGB5A3;
     t->palette_entries = 0;
     t->tlut = TLUT_MAX;
+    t->wrap_s = (int)wrap_s;
+    t->wrap_t = (int)wrap_t;
 }
 
 void GXInitTexObjCI(GXTexObj* obj, void* image_ptr, u16 width, u16 height,
                     GXCITexFmt format, GXTexWrapMode s, GXTexWrapMode t, u8 mip, u32 tlut) {
-    (void)s; (void)t; (void)mip;
+    (void)mip;
     MyTexObj* to = GetTexObjState(obj);
     if (!to) return;
     to->data = image_ptr;
@@ -521,6 +532,8 @@ void GXInitTexObjCI(GXTexObj* obj, void* image_ptr, u16 width, u16 height,
     to->h = height;
     to->fmt = (int)format;
     to->tlut = tlut;
+    to->wrap_s = (int)s;
+    to->wrap_t = (int)t;
     if (tlut < TLUT_MAX) {
         to->palette = s_tluts[tlut].data;
         to->palette_fmt = s_tluts[tlut].fmt;
@@ -602,13 +615,8 @@ void GXSetBlendMode(GXBlendMode type, GXBlendFactor src_factor,
 
 void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op,
                        GXCompare comp1, u8 ref1) {
-    // GLES2 has no fixed-function alpha compare.  Texture alpha still flows
-    // through normal blending; threshold discard is a later material slice.
-    (void)comp0;
-    (void)ref0;
-    (void)op;
-    (void)comp1;
-    (void)ref1;
+    Gfx3D_SetAlphaCompare((int)comp0, (int)ref0, (int)op,
+                          (int)comp1, (int)ref1);
 }
 
 void GXBegin(GXPrimitive type, GXVtxFmt fmt, u16 nverts) {

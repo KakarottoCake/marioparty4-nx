@@ -31,7 +31,8 @@ void GfxDebugDrawTest(void);
 
 // --- Textured 2D path (used by the GX->GL sprite translation) ---
 // Create/replace a GL texture from RGBA8888 pixels. Returns a GL texture id.
-unsigned int GfxCreateTexture(int w, int h, const void* rgba);
+unsigned int GfxCreateTexture(int w, int h, const void* rgba,
+                              int wrapS, int wrapT);
 void GfxDeleteTexture(unsigned int tex);
 
 // Draw triangles given in GL clip space (x,y per vertex) with matching UVs,
@@ -51,6 +52,8 @@ void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
 void Gfx3D_SetCullMode(int mode);
 void Gfx3D_SetDepthMode(int enable, int func, int update);
 void Gfx3D_SetBlendMode(int mode, int src, int dst, int op);
+void Gfx3D_SetAlphaCompare(int comp0, int ref0, int op,
+                           int comp1, int ref1);
 
 // Draw triangles in clip space without sampling a texture.  This is used by
 // the first native HSF mesh path, where materials are currently solid-color.
