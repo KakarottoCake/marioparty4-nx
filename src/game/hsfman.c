@@ -1293,9 +1293,29 @@ BOOL Hu3DModelCameraInfoSet(s16 arg0, u16 arg1) {
         obj_copy = var_r23;
         if (obj_copy->type == 7) {
             temp_f31 = obj_copy->mesh.base.rot.x;
+            #ifdef __SWITCH__
+            /* The title camera stores 32768.0 in this slot, which is not a
+             * usable roll angle (it wraps to 8 degrees and tilts the scene).
+             * Treat an out-of-range roll as none, matching the sanitising the
+             * HSF loader already does for camera.upRot. */
+            if (temp_f31 != temp_f31 || temp_f31 < -360.0f || temp_f31 > 360.0f) {
+                temp_f31 = 0.0f;
+            }
+            #endif
             cam->upRot = temp_f31;
 
             VECSubtract((Point3d* ) &obj_copy->camera.pos, (Point3d* ) &obj_copy->camera.target, &sp8);
+
+            #ifdef __SWITCH__
+            /* The rotation below is Rodrigues' formula turning (0,1,0) about
+             * the view axis, which is only valid for a unit axis.  With a raw
+             * pos-target difference (hundreds of units long) the cross terms
+             * blow up and the camera's up vector ends up nearly parallel to
+             * the view direction, rolling the whole scene.  It cancels to
+             * exactly (0,1,0) when the roll is zero, so the error only shows
+             * on cameras that actually specify a roll. */
+            VECNormalize(&sp8, &sp8);
+            #endif
 
             sp14.x = ((sp8.x * sp8.y * (1.0 - cosd(temp_f31))) - (sp8.z * sind(temp_f31)));
             sp14.y = ((sp8.y * sp8.y) + (1.0f - (sp8.y * sp8.y)) * cosd(temp_f31));
