@@ -34,3 +34,7 @@ compile_commands.json
 # Miscellaneous
 /*.txt
 *.exe
+
+# Local build logs and debug captures
+/*.log
+/.*.png

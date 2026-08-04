@@ -13,10 +13,11 @@ The long-term goal is a clean port plus quality-of-life extras: native GameCube
 controller support on Switch, and dynamic button glyphs that adapt to whichever
 controller is in use.
 
-> **Status: the real engine boots, native ANIM sprites work, and native HSF
-> transform/material/texture/skinning paths run in Eden.** The full visible game
-> is not finished: HSF cluster/shape animation and advanced materials, audio,
-> saves, UI glyph integration, and several overlays still need work.
+> **Status: the real engine boots, native ANIM sprites work, native HSF
+> transform/material/texture/skinning paths run in Eden, and native Switch PCM
+> playback now handles title music plus most original sound effects.** The full
+> visible game is not finished: HSF cluster/shape animation and advanced
+> materials, saves, UI glyph integration, and several overlays still need work.
 
 This repository contains **no game assets** — an existing, legally-obtained copy of
 the game is required to supply the data files.
@@ -48,6 +49,11 @@ What works:
   Cluster/shape animation is still off.
 - Provides real Switch system tick/time values and avoids the zero-byte audio
   staging allocation that corrupted the legacy heap.
+- Uses the Switch `audout` service for external title music (`mpgcstr.pdt`) and
+  Nintendo DSP-ADPCM sound effects from the external `mpgcsnd.msm` bank. The
+  embedded SFX index is metadata only; it does not contain game audio.
+- Maps 1,943 original sound effects to their DSP samples. 129 complex macro
+  effects still use the short synthesized fallback tone.
 - Reads up to four Switch controller slots, including native GameCube and Pro
   styles, with per-player button/stick state and a controller-aware glyph lookup.
 - Statically links the `bootDll` overlay (the GameCube uses dynamically linked
@@ -63,8 +69,8 @@ What does **not** work yet:
   indirect TEV effects, and complete 3D scene rendering are not finished; no
   game board or minigame scene is validated yet. The GLES2 TEV path currently
   supports the first four stages and one selected texture per draw.
-- No audio or save data yet. Glyph lookup exists, but the original UI has not yet
-  been fully wired to replace every on-screen button prompt.
+- Save data is not implemented yet. Glyph lookup exists, but the original UI
+  has not yet been fully wired to replace every on-screen button prompt.
 - Only `bootDll` is wired up; every other overlay currently stub-links and does
   nothing.
 
@@ -96,7 +102,8 @@ Notes:
 
 The game's data files are **not** embedded in the `.nro` — they are read as loose
 files from the SD card. You need the extracted MP4 (USA rev0) `files/` folder
-(the `data/`, `dll/`, `mess/`, ... subfolders) from your own copy of the game.
+(the `data/`, `dll/`, `mess/`, `sound/`, ... subfolders) from your own copy of
+the game.
 
 - **Eden / Ryujinx (emulator):** these load `.nro` homebrew directly (no keys, no
   firmware, no NSP needed). Put the game's `files/` folder at the root of the
@@ -105,7 +112,8 @@ files from the SD card. You need the extracted MP4 (USA rev0) `files/` folder
   card and launch via the homebrew menu.
 
 The asset root is auto-detected at startup (`romfs:/files`, then `sdmc:/files`,
-then `files/` relative to the working directory) — see `dvd_switch.c`.
+then `files/` relative to the working directory) — see `dvd_switch.c`. Audio
+requires `files/sound/mpgcstr.pdt` and `files/sound/mpgcsnd.msm`.
 
 ### One-click SD setup
 
@@ -136,6 +144,8 @@ Everything platform-specific lives in `src/platform/switch/`:
 |------|---------|
 | `switch_main.c` | Entry point. Mounts romfs, inits controllers/DVD, hands the display from the boot console to GL, then calls `game_main`. |
 | `sys_switch.c` | The big "stub layer": minimal/no-op implementations of the GameCube `GX`, `VI`, `OS`, `PAD`, `Hu*` engine calls so the game links. This is where most future work replaces stubs with real behavior. |
+| `audio_switch.c` | Native Switch PCM output, external stream playback, DSP-ADPCM decoding, and original/fallback sound-effect mixing. |
+| `sfx_index_data.c/.h` | Embedded metadata index for the external `mpgcsnd.msm` sound-effect bank; no audio samples are embedded. |
 | `gfx_switch.c/.h` | EGL/GLES2 setup, framebuffer clear/present, TEV-aware 2D/3D shader pipelines, viewport/scissor, and GX raster state. |
 | `gx_gl.c` | The `GX → OpenGL` translation layer (compiled with `-DTARGET_PC`): matrix math, immediate-mode vertex/normal/color capture, decoded TEV state, basic GX lighting, GameCube texture decoding, texture-map bindings, and GX raster-state translation. |
 | `hsf_switch.c` | Safe big-endian/32-bit-offset HSF conversion, skeleton/envelope skinning, mesh drawing, material state, bitmap/palette texture hookup, and guarded HSF motion-table conversion. |
