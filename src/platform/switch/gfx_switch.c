@@ -21,6 +21,20 @@ static int s_surfaceWidth = 1280;
 static int s_surfaceHeight = 720;
 static int s_colorUpdate = 1;
 static int s_alphaUpdate = 1;
+static int s_dbgScX, s_dbgScY, s_dbgScW, s_dbgScH;
+static int s_dbgScRaw[4];
+static unsigned int s_dbgScEmpty = 0;
+static unsigned int s_dbgScCalls = 0;
+static int s_dbgScSeen = 0;
+
+// Per-frame draw statistics, reported periodically so the log shows whether
+// geometry is actually reaching GL. A macro that mentions its own name is not
+// expanded again, so this instruments every call site without renaming them.
+static unsigned int s_drawCalls = 0;
+static unsigned int s_drawVerts = 0;
+#define glDrawArrays(mode, first, count) \
+    (s_drawCalls++, s_drawVerts += (unsigned int)(count), \
+     glDrawArrays((mode), (first), (count)))
 
 static GfxTevState s_tevState;
 
@@ -695,8 +709,16 @@ void GfxSetScissor(unsigned int left, unsigned int top,
     if (y < 0) y = 0;
     if (x + w > s_surfaceWidth) w = s_surfaceWidth - x;
     if (y + h > s_surfaceHeight) h = s_surfaceHeight - y;
+    s_dbgScCalls++;
+    if (!s_dbgScSeen || (long)w * h < (long)s_dbgScW * s_dbgScH) {
+        s_dbgScX = x; s_dbgScY = y; s_dbgScW = w; s_dbgScH = h;
+        s_dbgScRaw[0] = (int)left; s_dbgScRaw[1] = (int)top;
+        s_dbgScRaw[2] = (int)width; s_dbgScRaw[3] = (int)height;
+        s_dbgScSeen = 1;
+    }
     if (w <= 0 || h <= 0) {
         glScissor(0, 0, 0, 0);
+        s_dbgScEmpty++;
     } else {
         glScissor(x, y, w, h);
     }
@@ -1073,9 +1095,30 @@ void GfxBeginFrame(void)
 
 void GfxPresent(void)
 {
+    static unsigned int frame = 0;
+
     if (s_display == EGL_NO_DISPLAY) {
         return;
     }
+    if ((frame % 120) == 0) {
+        extern void GXGLReportFrameStats(void);
+        OSReport("Gfx: frame %u draws=%u verts=%u\n", frame, s_drawCalls,
+                 s_drawVerts);
+        OSReport("Gfx: scissor raw(%d,%d,%d,%d) gl(%d,%d,%d,%d) emptyCount=%u\n",
+                 s_dbgScRaw[0], s_dbgScRaw[1], s_dbgScRaw[2], s_dbgScRaw[3],
+                 s_dbgScX, s_dbgScY, s_dbgScW, s_dbgScH, s_dbgScEmpty);
+        OSReport("Gfx: colorUpd=%d alphaUpd=%d blendMode=%d src=%d dst=%d depthEn=%d depthFunc=%d cull=%d surf=%dx%d\n",
+                 s_colorUpdate, s_alphaUpdate, s_3dBlendMode, s_3dBlendSrc,
+                 s_3dBlendDst, s_3dDepthEnable, s_3dDepthFunc, s_3dCullMode,
+                 s_surfaceWidth, s_surfaceHeight);
+        s_dbgScEmpty = 0;
+        s_dbgScCalls = 0;
+        s_dbgScSeen = 0;
+        GXGLReportFrameStats();
+    }
+    frame++;
+    s_drawCalls = 0;
+    s_drawVerts = 0;
     eglSwapBuffers(s_display, s_surface);
 }
 
