@@ -2562,6 +2562,24 @@ static void SwitchHsfUpdateEnvelope(const HSFDATA *model, HSFOBJECT *object) {
     if (!SwitchHsfMtxInverse(meshCurrent, meshCurrentInverse)) {
         return;
     }
+    /* TODO: skinned meshes still stretch because vertices can be left partly
+     * in bind pose rather than following the skeleton.  Two known causes:
+     *
+     * 1. Multi-bone envelopes below accumulate
+     *      dest = source + sum(w_i * (M_i * source - source))
+     *    which only equals sum(w_i * M_i * source) when sum(w_i) == 1.  The
+     *    weights are used raw here with no normalisation (and the multi path
+     *    does not even clamp them), so any vertex whose weights sum to less
+     *    than one is blended back toward its bind position.
+     * 2. A vertex covered by no envelope at all keeps the bind pose this
+     *    memcpy leaves behind.
+     *
+     * Both pull affected vertices toward bind pose - not toward the origin -
+     * while their neighbours follow the joints, which is what shows up as the
+     * vertical smearing on character torsos.  Fix by accumulating the weight
+     * sum per vertex and normalising, and by deciding what an unenveloped
+     * vertex should follow (the original leans on every vertex being covered).
+     */
     memcpy(destinationVertex, sourceVertex,
            (u32)object->mesh.vertex->count * sizeof(HuVecF));
     if (sourceNormal && destinationNormal) {
