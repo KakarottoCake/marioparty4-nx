@@ -3030,6 +3030,9 @@ static const HSFATTRIBUTE *SwitchHsfMaterialAttribute(
     return &object->mesh.attribute[attrIndex];
 }
 
+unsigned int g_hsfTexCalls, g_hsfTexReflect, g_hsfTexNoAttr, g_hsfTexNoBmp,
+             g_hsfTexBadFmt, g_hsfTexLoaded;
+
 static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
                                 s16 materialCount) {
     GXTexObj texObj;
@@ -3041,15 +3044,6 @@ static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
     BOOL indexed = FALSE;
     u32 materialFlags = object ? object->flags : 0;
 
-#ifdef __SWITCH__
-    /* Keep the native HSF geometry path usable while the GLES texture path is
-     * being brought up.  Materials still provide their original solid tint. */
-    (void)object;
-    (void)matIndex;
-    (void)materialCount;
-    return;
-#endif
-
     if (object && object->mesh.material && matIndex >= 0 &&
         matIndex < materialCount && matIndex < 0x1000) {
         materialFlags |= object->mesh.material[matIndex].flags;
@@ -3057,17 +3051,21 @@ static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
     /* Reflection materials use a GameCube environment/cubemap path that the
      * GLES2 compatibility layer does not expose yet.  Keep their geometry
      * visible with the material tint until that path is implemented. */
+    g_hsfTexCalls++;
     if (materialFlags & HSF_MATERIAL_REFLECTMODEL) {
+        g_hsfTexReflect++;
         return;
     }
 
     GXInvalidateTexAll();
     attribute = SwitchHsfMaterialAttribute(object, matIndex, materialCount);
     if (!attribute) {
+        g_hsfTexNoAttr++;
         return;
     }
     bitmap = attribute->bitmap;
     if (!bitmap || !bitmap->data || bitmap->sizeX <= 0 || bitmap->sizeY <= 0) {
+        g_hsfTexNoBmp++;
         return;
     }
     switch (bitmap->dataFmt) {
@@ -3141,6 +3139,7 @@ static void SwitchHsfSetTexture(const HSFOBJECT *object, s16 matIndex,
                        attribute->wrapT ? GX_REPEAT : GX_CLAMP, GX_FALSE, 0);
     }
     GXLoadTexObj(&texObj, GX_TEXMAP0);
+    g_hsfTexLoaded++;
 }
 
 static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index,

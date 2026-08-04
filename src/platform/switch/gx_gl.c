@@ -874,6 +874,15 @@ void GXGLReportFrameStats(void) {
     OSReport("GXGL: texDraws=%u solidDraws=%u tint[%.2f %.2f %.2f %.2f] stages=%d\n",
              s_dbgTexDraws, s_dbgNoTexDraws, s_dbgTint[0], s_dbgTint[1],
              s_dbgTint[2], s_dbgTint[3], s_dbgStages);
+    {
+        extern unsigned int g_hsfTexCalls, g_hsfTexReflect, g_hsfTexNoAttr,
+                            g_hsfTexNoBmp, g_hsfTexLoaded;
+        OSReport("HSFtex: calls=%u reflect=%u noAttr=%u noBmp=%u loaded=%u tevMap0=%d\n",
+                 g_hsfTexCalls, g_hsfTexReflect, g_hsfTexNoAttr, g_hsfTexNoBmp,
+                 g_hsfTexLoaded, s_tevState.stages[0].texMap);
+        g_hsfTexCalls = g_hsfTexReflect = g_hsfTexNoAttr = 0;
+        g_hsfTexNoBmp = g_hsfTexLoaded = 0;
+    }
     s_dbgTexDraws = 0;
     s_dbgNoTexDraws = 0;
     s_dbgEmptyDraws = 0;
