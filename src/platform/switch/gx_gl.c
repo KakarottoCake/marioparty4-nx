@@ -105,18 +105,22 @@ void C_MTXLookAt(Mtx m, const Point3d* camPos, const Vec* camUp,
         fl = 1.0f;
     }
     fx /= fl; fy /= fl; fz /= fl;
-    rx = camUp->y * fz - camUp->z * fy;
-    ry = camUp->z * fx - camUp->x * fz;
-    rz = camUp->x * fy - camUp->y * fx;
+    /* right = forward x up.  Using up x forward instead negates the camera's
+     * X axis, which mirrors the whole scene and reverses triangle winding so
+     * backface culling then discards the wrong faces. */
+    rx = fy * camUp->z - fz * camUp->y;
+    ry = fz * camUp->x - fx * camUp->z;
+    rz = fx * camUp->y - fy * camUp->x;
     rl = sqrtf(rx * rx + ry * ry + rz * rz);
     if (rl < 0.000001f) {
         rx = 1.0f; ry = 0.0f; rz = 0.0f;
         rl = 1.0f;
     }
     rx /= rl; ry /= rl; rz /= rl;
-    ux = fy * rz - fz * ry;
-    uy = fz * rx - fx * rz;
-    uz = fx * ry - fy * rx;
+    /* up = right x forward */
+    ux = ry * fz - rz * fy;
+    uy = rz * fx - rx * fz;
+    uz = rx * fy - ry * fx;
     m[0][0] = rx; m[0][1] = ry; m[0][2] = rz;
     m[1][0] = ux; m[1][1] = uy; m[1][2] = uz;
     m[2][0] = -fx; m[2][1] = -fy; m[2][2] = -fz;
