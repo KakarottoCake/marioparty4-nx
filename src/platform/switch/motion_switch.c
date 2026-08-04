@@ -80,12 +80,28 @@ float *GetObjTRXPtr(HSFOBJECT *object, u16 channel) {
 
 static HSFOBJECT *SwitchMotionObject(HSFDATA *model, HSFMOTION *motion,
                                       u16 target) {
-    (void)motion;
-    if (!model || !model->object || target == 0xFFFF ||
-        target >= (u16)model->objectNum) {
+    const char *name;
+    s32 i;
+
+    /* Motion track targets are name references in the file, not object
+     * indices: the original resolves them with SearchObjectIndex, which turns
+     * the value into a string and matches it against object names. Indexing
+     * with the raw value drives the wrong bones, which leaves rigged meshes
+     * stretched while static geometry looks fine. */
+    if (!model || !model->object || target == 0xFFFF) {
         return NULL;
     }
-    return &model->object[target];
+    name = SwitchHsfMotionTargetName(motion, target);
+    if (!name) {
+        return NULL;
+    }
+    for (i = 0; i < model->objectNum; i++) {
+        if (model->object[i].name &&
+            strcmp(model->object[i].name, name) == 0) {
+            return &model->object[i];
+        }
+    }
+    return NULL;
 }
 
 static float SwitchMotionBezier(const HSFTRACK *track, float time) {
