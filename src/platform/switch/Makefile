@@ -16,7 +16,7 @@ LDFLAGS := -specs="$(DEVKITPRO)/libnx/switch.specs" -g -march=armv8-a+crc+crypto
 # GL rendering stack (devkitPro mesa) + math. Order matters: GLESv2 before its deps.
 LIBS := -lEGL -lGLESv2 -lglapi -ldrm_nouveau -lstdc++ -lnx -lm
 
-OBJS := switch_main.o controller.o dvd_switch.o sys_switch.o gfx_switch.o gx_gl.o hsf_switch.o motion_switch.o jmp_switch.o projection_override/projection_override.o \
+OBJS := switch_main.o controller.o dvd_switch.o sys_switch.o audio_switch.o sfx_index_data.o gfx_switch.o gx_gl.o hsf_switch.o motion_switch.o jmp_switch.o projection_override/projection_override.o \
         ../../game/sprman.o ../../game/sprput.o \
         ../../game/hsfman.o ../../game/pad.o ../../game/main.o ../../game/memory.o ../../game/malloc.o ../../game/process.o \
         ../../game/objdll.o ../../game/objmain.o ../../REL/bootDll/main.o ../../REL/bootDll/language.o \
