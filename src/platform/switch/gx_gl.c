@@ -892,6 +892,12 @@ void GXGLReportFrameStats(void) {
         g_hsfTexCalls = g_hsfTexReflect = g_hsfTexNoAttr = 0;
         g_hsfTexNoBmp = g_hsfTexLoaded = 0;
     }
+    {
+        extern unsigned int g_tevUploadsDone, g_tevUploadsSkipped;
+        OSReport("TevUpload: done=%u skipped=%u\n", g_tevUploadsDone,
+                 g_tevUploadsSkipped);
+        g_tevUploadsDone = g_tevUploadsSkipped = 0;
+    }
     OSReport("TexCache: hit=%u miss=%u upload=%u avgProbe=%u entries=%d\n",
              g_texHit, g_texMiss, g_texUpload,
              g_texHit ? g_texProbe / g_texHit : 0, s_texCacheN);

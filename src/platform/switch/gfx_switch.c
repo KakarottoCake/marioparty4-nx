@@ -207,6 +207,28 @@ static void GfxSetDepthMaskCached(int on) {
     }
 }
 
+// Enable exactly the vertex attribute arrays a draw needs, touching only the
+// ones whose state actually differs.  Previously every draw enabled three and
+// disabled them again, six wasted calls per draw.
+static int s_glActiveTexSet = 0;
+static unsigned int s_glAttribMask = 0;
+static void GfxSetAttribMask(unsigned int want) {
+    unsigned int diff = s_glAttribMask ^ want;
+    unsigned int i;
+    if (!diff) return;
+    for (i = 0; i < 16; i++) {
+        unsigned int bit = 1u << i;
+        if (!(diff & bit)) continue;
+        if (want & bit) glEnableVertexAttribArray((GLuint)i);
+        else glDisableVertexAttribArray((GLuint)i);
+    }
+    s_glAttribMask = want;
+}
+
+static unsigned int GfxAttribBit(GLint loc) {
+    return (loc >= 0 && loc < 16) ? (1u << (unsigned int)loc) : 0u;
+}
+
 static void GfxApply3DState(void) {
     int cull = s_3dCullMode != 0;
     if (s_glCull != cull) {
@@ -575,6 +597,7 @@ typedef struct GfxTevUpload {
     float tint[4];
 } GfxTevUpload;
 static GfxTevUpload s_tevUploads[4];
+unsigned int g_tevUploadsDone, g_tevUploadsSkipped;
 static int s_tevUploadCount = 0;
 
 static void GfxInvalidateTevUploads(void) {
@@ -598,6 +621,7 @@ static void GfxUploadTev(const GfxTevUniforms* u, int hasTexture,
             slot->tint[0] == r && slot->tint[1] == g && slot->tint[2] == b &&
             slot->tint[3] == a &&
             memcmp(&slot->tev, &s_tevState, sizeof(GfxTevState)) == 0) {
+            g_tevUploadsSkipped++;
             return;  // program already holds exactly these uniforms
         }
     } else if (s_tevUploadCount <
@@ -605,6 +629,7 @@ static void GfxUploadTev(const GfxTevUniforms* u, int hasTexture,
         slot = &s_tevUploads[s_tevUploadCount++];
         slot->owner = u;
     }
+    g_tevUploadsDone++;
     if (slot) {
         slot->tev = s_tevState;
         slot->hasTexture = hasTexture;
@@ -896,10 +921,9 @@ void Gfx2D_DrawQuad(float x0, float y0, float x1, float y1,
     };
     GfxUseProgram(s_prog2d);
     glUniform4f(s_locColor, r, g, b, a);
-    glEnableVertexAttribArray(s_locPos);
+    GfxSetAttribMask(GfxAttribBit(s_locPos));
     glVertexAttribPointer(s_locPos, 2, GL_FLOAT, GL_FALSE, 0, verts);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    glDisableVertexAttribArray(s_locPos);
 }
 
 // --- Textured 2D pipeline ---
@@ -998,20 +1022,15 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
     GfxSetBlendEnabled(1);
     GfxSetBlendFuncCached(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     GfxSetColorMaskCached(s_colorUpdate, s_alphaUpdate);
-    glActiveTexture(GL_TEXTURE0);
+    if (!s_glActiveTexSet) { glActiveTexture(GL_TEXTURE0); s_glActiveTexSet = 1; }
     GfxBindTexture2D((GLuint)tex);
     glUniform1i(s_texUniforms.sampler, 0);
     GfxUploadTev(&s_texUniforms, tex != 0, 0, r, g, b, a);
-    glEnableVertexAttribArray(s_texLocPos);
+    GfxSetAttribMask(GfxAttribBit(s_texLocPos) | GfxAttribBit(s_texLocUV) | GfxAttribBit(s_texLocColor));
     glVertexAttribPointer(s_texLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
-    glEnableVertexAttribArray(s_texLocUV);
     glVertexAttribPointer(s_texLocUV, 2, GL_FLOAT, GL_FALSE, 0, uv);
-    glEnableVertexAttribArray(s_texLocColor);
     glVertexAttribPointer(s_texLocColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GL_TRIANGLES, 0, count);
-    glDisableVertexAttribArray(s_texLocPos);
-    glDisableVertexAttribArray(s_texLocUV);
-    glDisableVertexAttribArray(s_texLocColor);
 }
 
 static GLenum GfxPrimitiveMode(int primitive) {
@@ -1031,20 +1050,15 @@ void Gfx2D_DrawTexGeometry(const float* clipXY, const float* uv,
     GfxSetBlendEnabled(1);
     GfxSetBlendFuncCached(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     GfxSetColorMaskCached(s_colorUpdate, s_alphaUpdate);
-    glActiveTexture(GL_TEXTURE0);
+    if (!s_glActiveTexSet) { glActiveTexture(GL_TEXTURE0); s_glActiveTexSet = 1; }
     GfxBindTexture2D((GLuint)tex);
     glUniform1i(s_texUniforms.sampler, 0);
     GfxUploadTev(&s_texUniforms, tex != 0, 0, r, g, b, a);
-    glEnableVertexAttribArray(s_texLocPos);
+    GfxSetAttribMask(GfxAttribBit(s_texLocPos) | GfxAttribBit(s_texLocUV) | GfxAttribBit(s_texLocColor));
     glVertexAttribPointer(s_texLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
-    glEnableVertexAttribArray(s_texLocUV);
     glVertexAttribPointer(s_texLocUV, 2, GL_FLOAT, GL_FALSE, 0, uv);
-    glEnableVertexAttribArray(s_texLocColor);
     glVertexAttribPointer(s_texLocColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GfxPrimitiveMode(primitive), 0, count);
-    glDisableVertexAttribArray(s_texLocPos);
-    glDisableVertexAttribArray(s_texLocUV);
-    glDisableVertexAttribArray(s_texLocColor);
 }
 
 void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
@@ -1053,20 +1067,15 @@ void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
     if (s_prog3dTex == 0 || !clipXYZ || !uv || !color || count <= 0) return;
     GfxUseProgram(s_prog3dTex);
     GfxApply3DState();
-    glActiveTexture(GL_TEXTURE0);
+    if (!s_glActiveTexSet) { glActiveTexture(GL_TEXTURE0); s_glActiveTexSet = 1; }
     GfxBindTexture2D((GLuint)tex);
     glUniform1i(s_3dTexUniforms.sampler, 0);
     GfxUploadTev(&s_3dTexUniforms, tex != 0, 0, r, g, b, a);
-    glEnableVertexAttribArray(s_3dTexLocPos);
+    GfxSetAttribMask(GfxAttribBit(s_3dTexLocPos) | GfxAttribBit(s_3dTexLocUV) | GfxAttribBit(s_3dTexLocColor));
     glVertexAttribPointer(s_3dTexLocPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
-    glEnableVertexAttribArray(s_3dTexLocUV);
     glVertexAttribPointer(s_3dTexLocUV, 2, GL_FLOAT, GL_FALSE, 0, uv);
-    glEnableVertexAttribArray(s_3dTexLocColor);
     glVertexAttribPointer(s_3dTexLocColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GL_TRIANGLES, 0, count);
-    glDisableVertexAttribArray(s_3dTexLocPos);
-    glDisableVertexAttribArray(s_3dTexLocUV);
-    glDisableVertexAttribArray(s_3dTexLocColor);
 }
 
 void Gfx3D_DrawTexGeometry(const float* clipXYZ, const float* uv,
@@ -1075,20 +1084,15 @@ void Gfx3D_DrawTexGeometry(const float* clipXYZ, const float* uv,
     if (s_prog3dTex == 0 || !clipXYZ || !uv || !color || count <= 0) return;
     GfxUseProgram(s_prog3dTex);
     GfxApply3DState();
-    glActiveTexture(GL_TEXTURE0);
+    if (!s_glActiveTexSet) { glActiveTexture(GL_TEXTURE0); s_glActiveTexSet = 1; }
     GfxBindTexture2D((GLuint)tex);
     glUniform1i(s_3dTexUniforms.sampler, 0);
     GfxUploadTev(&s_3dTexUniforms, tex != 0, 0, r, g, b, a);
-    glEnableVertexAttribArray(s_3dTexLocPos);
+    GfxSetAttribMask(GfxAttribBit(s_3dTexLocPos) | GfxAttribBit(s_3dTexLocUV) | GfxAttribBit(s_3dTexLocColor));
     glVertexAttribPointer(s_3dTexLocPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
-    glEnableVertexAttribArray(s_3dTexLocUV);
     glVertexAttribPointer(s_3dTexLocUV, 2, GL_FLOAT, GL_FALSE, 0, uv);
-    glEnableVertexAttribArray(s_3dTexLocColor);
     glVertexAttribPointer(s_3dTexLocColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GfxPrimitiveMode(primitive), 0, count);
-    glDisableVertexAttribArray(s_3dTexLocPos);
-    glDisableVertexAttribArray(s_3dTexLocUV);
-    glDisableVertexAttribArray(s_3dTexLocColor);
 }
 
 void Gfx2D_DrawSolidTris(const float* clipXY, const float* color, int count,
@@ -1104,17 +1108,14 @@ void Gfx2D_DrawSolidTris(const float* clipXY, const float* color, int count,
                     GfxBlendFactor(s_3dBlendDst, 1));
     }
     GfxSetColorMaskCached(s_colorUpdate, s_alphaUpdate);
-    glActiveTexture(GL_TEXTURE0);
+    if (!s_glActiveTexSet) { glActiveTexture(GL_TEXTURE0); s_glActiveTexSet = 1; }
     GfxBindTexture2D(s_dummyTexture);
     glUniform1i(s_2dTevUniforms.sampler, 0);
     GfxUploadTev(&s_2dTevUniforms, 0, 0, r, g, b, a);
-    glEnableVertexAttribArray(s_2dTevLocPos);
+    GfxSetAttribMask(GfxAttribBit(s_2dTevLocPos) | GfxAttribBit(s_2dTevLocColor));
     glVertexAttribPointer(s_2dTevLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
-    glEnableVertexAttribArray(s_2dTevLocColor);
     glVertexAttribPointer(s_2dTevLocColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GL_TRIANGLES, 0, count);
-    glDisableVertexAttribArray(s_2dTevLocPos);
-    glDisableVertexAttribArray(s_2dTevLocColor);
 }
 
 void Gfx2D_DrawSolidGeometry(const float* clipXY, const float* color,
@@ -1131,17 +1132,14 @@ void Gfx2D_DrawSolidGeometry(const float* clipXY, const float* color,
                     GfxBlendFactor(s_3dBlendDst, 1));
     }
     GfxSetColorMaskCached(s_colorUpdate, s_alphaUpdate);
-    glActiveTexture(GL_TEXTURE0);
+    if (!s_glActiveTexSet) { glActiveTexture(GL_TEXTURE0); s_glActiveTexSet = 1; }
     GfxBindTexture2D(s_dummyTexture);
     glUniform1i(s_2dTevUniforms.sampler, 0);
     GfxUploadTev(&s_2dTevUniforms, 0, 0, r, g, b, a);
-    glEnableVertexAttribArray(s_2dTevLocPos);
+    GfxSetAttribMask(GfxAttribBit(s_2dTevLocPos) | GfxAttribBit(s_2dTevLocColor));
     glVertexAttribPointer(s_2dTevLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
-    glEnableVertexAttribArray(s_2dTevLocColor);
     glVertexAttribPointer(s_2dTevLocColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GfxPrimitiveMode(primitive), 0, count);
-    glDisableVertexAttribArray(s_2dTevLocPos);
-    glDisableVertexAttribArray(s_2dTevLocColor);
 }
 
 void Gfx3D_DrawSolidTris(const float* clipXYZ, const float* color, int count,
@@ -1150,13 +1148,10 @@ void Gfx3D_DrawSolidTris(const float* clipXYZ, const float* color, int count,
     GfxUseProgram(s_prog3d);
     GfxApply3DState();
     glUniform4f(s_loc3dTint, r, g, b, a);
-    glEnableVertexAttribArray(s_loc3dPos);
+    GfxSetAttribMask(GfxAttribBit(s_loc3dPos) | GfxAttribBit(s_loc3dVertexColor));
     glVertexAttribPointer(s_loc3dPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
-    glEnableVertexAttribArray(s_loc3dVertexColor);
     glVertexAttribPointer(s_loc3dVertexColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GL_TRIANGLES, 0, count);
-    glDisableVertexAttribArray(s_loc3dPos);
-    glDisableVertexAttribArray(s_loc3dVertexColor);
 }
 
 void Gfx3D_DrawSolidGeometry(const float* clipXYZ, const float* color,
@@ -1166,13 +1161,10 @@ void Gfx3D_DrawSolidGeometry(const float* clipXYZ, const float* color,
     GfxUseProgram(s_prog3d);
     GfxApply3DState();
     glUniform4f(s_loc3dTint, r, g, b, a);
-    glEnableVertexAttribArray(s_loc3dPos);
+    GfxSetAttribMask(GfxAttribBit(s_loc3dPos) | GfxAttribBit(s_loc3dVertexColor));
     glVertexAttribPointer(s_loc3dPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
-    glEnableVertexAttribArray(s_loc3dVertexColor);
     glVertexAttribPointer(s_loc3dVertexColor, 4, GL_FLOAT, GL_FALSE, 0, color);
     glDrawArrays(GfxPrimitiveMode(primitive), 0, count);
-    glDisableVertexAttribArray(s_loc3dPos);
-    glDisableVertexAttribArray(s_loc3dVertexColor);
 }
 
 void Gfx3D_SetCullMode(int mode) {
