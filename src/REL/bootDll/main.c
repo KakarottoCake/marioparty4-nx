@@ -121,6 +121,16 @@ void BootExec(void)
     HuSprGrpMemberSet(group, 0, sprite_nintendo);
     HuSprPosSet(group, 0, 288, 240);
     HuSprAttrSet(group, 0, HUSPR_ATTR_DISPOFF);
+#ifdef __SWITCH__
+    /* The original splash/demo path depends on GameCube THP, window, and
+     * audio-sequencer services that are not present on Switch yet.  Enter
+     * the actual title screen after creating its native models instead of
+     * waiting in that incomplete path. */
+    HuWinInit(1);
+    BootTitleCreate();
+    SystemInitF = 1;
+    goto boot_title_exec;
+#endif
     if (omovlevtno != 0) {
         HuAudSndGrpSetSet(0);
         data = HuSprAnimReadFile(TITLE_HUDSON_ANM);
@@ -171,9 +181,15 @@ void BootExec(void)
             HuSprGrpMemberSet(group, 1, sprite_hudson);
             HuSprPosSet(group, 1, 288, 240);
             HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
+            #ifdef __SWITCH__
+            for (i = 0; i < 180; i++) {
+                HuPrcVSleep();
+            }
+            #else
             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
                 HuPrcVSleep();
             }
+            #endif
         }
         else {
             for (i = 0; i < 180; i++) {
@@ -206,9 +222,15 @@ void BootExec(void)
             group_samp = HuMemDirectMalloc(HEAP_MODEL, msmSysGetSampSize(0));
             msmSysLoadGroup(0, group_samp, 0);
             HuMemDirectFree(group_samp);
+            #ifdef __SWITCH__
+            for (i = 0; i < 180; i++) {
+                HuPrcVSleep();
+            }
+            #else
             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
                 HuPrcVSleep();
             }
+            #endif
         }
         else {
             for (i = 0; i < 180; i++) {
@@ -236,9 +258,15 @@ void BootExec(void)
             HuAudSndGrpSetSet(0);
             SystemInitF = 1;
         }
+        #ifdef __SWITCH__
+        for (i = 0; i < 60; i++) {
+            HuPrcVSleep();
+        }
+        #else
         while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 1000) {
             HuPrcVSleep();
         }
+        #endif
         HuSprAttrSet(group, 0, HUSPR_ATTR_DISPOFF);
         HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
         group_thp = HuSprGrpCreate(1);
@@ -278,6 +306,7 @@ void BootExec(void)
         }
         skip_wait = FALSE;
     }
+boot_title_exec:
     if (!BootTitleExec()) {
         HuPrcSleep(60);
         goto repeat;
@@ -602,6 +631,19 @@ BOOL BootTitleExec(void)
     s16 i;
     s16 choice;
     float temp;
+#ifdef __SWITCH__
+    /* Keep the first Switch bring-up path deterministic.  The original title
+     * animation uses GameCube sprite/window timing that is not ported yet. */
+    Hu3DModelAttrReset(titleMdlId[0], HU3D_ATTR_DISPOFF);
+    Hu3DModelAttrReset(titleMdlId[1], HU3D_ATTR_DISPOFF);
+    Hu3DModelAttrReset(titleMdlId[2], HU3D_ATTR_DISPOFF);
+    for (;;) {
+        if (HuPadBtnDown[0] & (PAD_BUTTON_START | PAD_BUTTON_A)) {
+            return 1;
+        }
+        HuPrcVSleep();
+    }
+#endif
     repeat:
     Hu3DModelAttrReset(titleMdlId[0], HU3D_ATTR_DISPOFF);
     Hu3DModelAttrReset(titleMdlId[1], HU3D_ATTR_DISPOFF);
