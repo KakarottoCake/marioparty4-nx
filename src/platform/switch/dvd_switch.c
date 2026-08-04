@@ -20,6 +20,13 @@ static u32 g_VirtualFileCount = 0;
 // across launch environments (hbmenu on HW vs. Eden/Ryujinx loading an NRO).
 static char g_AssetBase[256] = "romfs:/files";
 
+static BOOL FileExists(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return FALSE;
+    fclose(f);
+    return TRUE;
+}
+
 static void ScanDirectory(const char* baseDir, const char* subDir) {
     char path[512];
     if (subDir && strlen(subDir) > 0) {
@@ -69,25 +76,18 @@ static void ScanDirectory(const char* baseDir, const char* subDir) {
 }
 
 static void MapDVDPath(const char* dvdPath, char* outPath, size_t maxLen) {
-    // Primary: the discovered asset root (e.g. sdmc:/files on Eden).
+    // Primary: the discovered asset root. Keep the fallbacks because the
+    // emulator and real hardware use different working-directory rules.
     snprintf(outPath, maxLen, "%s/%s", g_AssetBase, dvdPath);
-    FILE* f = fopen(outPath, "rb");
-    if (f) {
-        fclose(f);
-        return;
-    }
+    if (FileExists(outPath)) return;
     snprintf(outPath, maxLen, "romfs:/files/%s", dvdPath);
-    f = fopen(outPath, "rb");
-    if (f) {
-        fclose(f);
-        return;
-    }
+    if (FileExists(outPath)) return;
+    snprintf(outPath, maxLen, "sdmc:/switch/files/%s", dvdPath);
+    if (FileExists(outPath)) return;
+    snprintf(outPath, maxLen, "sdmc:/files/%s", dvdPath);
+    if (FileExists(outPath)) return;
     snprintf(outPath, maxLen, "romfs:/%s", dvdPath);
-    f = fopen(outPath, "rb");
-    if (f) {
-        fclose(f);
-        return;
-    }
+    if (FileExists(outPath)) return;
     snprintf(outPath, maxLen, "files/%s", dvdPath);
 }
 
@@ -96,7 +96,12 @@ void DVDInit(void) {
     g_VirtualFileCount = 0;
 
     // Find where the game's data files actually live.
-    static const char* candidates[] = { "romfs:/files", "sdmc:/files", "files" };
+    static const char* candidates[] = {
+        "romfs:/files",
+        "sdmc:/switch/files",
+        "sdmc:/files",
+        "files"
+    };
     for (u32 c = 0; c < sizeof(candidates) / sizeof(candidates[0]); c++) {
         DIR* d = opendir(candidates[c]);
         if (d) {

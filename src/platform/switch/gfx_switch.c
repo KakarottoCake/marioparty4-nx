@@ -167,7 +167,8 @@ static const char* kFrag2D =
 static GLuint s_prog3d = 0;
 static GLint s_loc3dPos = -1;
 static GLint s_loc3dVertexColor = -1;
-static GfxTevUniforms s_3dUniforms;
+static GLint s_loc3dTint = -1;
+static GLuint s_dummyTexture = 0;
 
 static const char* kVert3D =
     "attribute vec3 aPos;\n"
@@ -175,6 +176,12 @@ static const char* kVert3D =
     "varying vec2 vUV;\n"
     "varying vec4 vColor;\n"
     "void main() { vUV = vec2(0.0); vColor = aColor; gl_Position = vec4(aPos, 1.0); }\n";
+
+static const char* kFrag3DSolid =
+    "precision mediump float;\n"
+    "varying vec4 vColor;\n"
+    "uniform vec4 uTint;\n"
+    "void main() { gl_FragColor = vColor * uTint; }\n";
 
 // GX TEV translated to a small fixed GLES2 shader.  This follows Aurora's
 // state-driven approach while staying within the Switch port's C/GLES2
@@ -362,6 +369,11 @@ static const char* kVert3DTex =
     "varying vec4 vColor;\n"
     "void main() { vUV = aUV; vColor = aColor; gl_Position = vec4(aPos, 1.0); }\n";
 
+static void GfxInitDummyTexture(void) {
+    static const unsigned char white[4] = {255, 255, 255, 255};
+    s_dummyTexture = GfxCreateTexture(1, 1, white, 0, 0);
+}
+
 static GLuint CompileShader(GLenum type, const char* src) {
     GLuint sh = glCreateShader(type);
     glShaderSource(sh, 1, &src, NULL);
@@ -431,11 +443,39 @@ static void GfxCacheTevUniforms(GLuint program, GfxTevUniforms* u) {
 }
 
 static void GfxUploadTev(const GfxTevUniforms* u, int hasTexture,
-                          float r, float g, float b, float a) {
+                          int directSolid, float r, float g, float b, float a) {
     if (!u) return;
-    glUniform1i(u->numStages, s_tevState.numStages);
+    glUniform1i(u->numStages, directSolid ? 1 : s_tevState.numStages);
     for (int stage = 0; stage < GFX_TEV_MAX_STAGES; stage++) {
+        GfxTevStageState solidStage;
         const GfxTevStageState* s = &s_tevState.stages[stage];
+        if (directSolid && stage == 0) {
+            solidStage = *s;
+            /* GX_CC_ZERO/RASC/ONE and GX_CA_RASA/ZERO.  This is the
+             * fixed one-stage equivalent of outputting the material tint. */
+            solidStage.colorIn[0] = 15;
+            solidStage.colorIn[1] = 10;
+            solidStage.colorIn[2] = 12;
+            solidStage.colorIn[3] = 15;
+            solidStage.alphaIn[0] = 5;
+            solidStage.alphaIn[1] = 5;
+            solidStage.alphaIn[2] = 7;
+            solidStage.alphaIn[3] = 7;
+            solidStage.colorOp = 0;
+            solidStage.colorBias = 0;
+            solidStage.colorScale = 0;
+            solidStage.colorClamp = 1;
+            solidStage.colorOut = 0;
+            solidStage.alphaOp = 0;
+            solidStage.alphaBias = 0;
+            solidStage.alphaScale = 0;
+            solidStage.alphaClamp = 1;
+            solidStage.alphaOut = 0;
+            solidStage.texMap = 255;
+            /* GX_COLOR0A0: the shader uses this to expose raster color. */
+            solidStage.channel = 0;
+            s = &solidStage;
+        }
         for (int arg = 0; arg < 4; arg++) {
             glUniform1i(u->colorIn[stage][arg], s->colorIn[arg]);
             glUniform1i(u->alphaIn[stage][arg], s->alphaIn[arg]);
@@ -520,7 +560,7 @@ static void GfxInit2DTev(void) {
 
 static void GfxInit3D(void) {
     GLuint vs = CompileShader(GL_VERTEX_SHADER, kVert3D);
-    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFragTev);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFrag3DSolid);
     if (!vs || !fs) return;
     s_prog3d = glCreateProgram();
     glAttachShader(s_prog3d, vs);
@@ -541,7 +581,7 @@ static void GfxInit3D(void) {
     glDeleteShader(fs);
     s_loc3dPos = glGetAttribLocation(s_prog3d, "aPos");
     s_loc3dVertexColor = glGetAttribLocation(s_prog3d, "aColor");
-    GfxCacheTevUniforms(s_prog3d, &s_3dUniforms);
+    s_loc3dTint = glGetUniformLocation(s_prog3d, "uTint");
     OSReport("Gfx: solid 3D pipeline ready\n");
 }
 
@@ -618,6 +658,7 @@ int GfxInit(void)
     GfxInitTex();
     GfxInit3D();
     GfxInit3DTex();
+    GfxInitDummyTexture();
     glViewport(0, 0, s_surfaceWidth, s_surfaceHeight);
     glDisable(GL_SCISSOR_TEST);
     return 1;
@@ -785,7 +826,7 @@ void Gfx2D_DrawTexTris(const float* clipXY, const float* uv, int count,
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glUniform1i(s_texUniforms.sampler, 0);
-    GfxUploadTev(&s_texUniforms, tex != 0, r, g, b, a);
+    GfxUploadTev(&s_texUniforms, tex != 0, 0, r, g, b, a);
     glEnableVertexAttribArray(s_texLocPos);
     glVertexAttribPointer(s_texLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
     glEnableVertexAttribArray(s_texLocUV);
@@ -821,7 +862,7 @@ void Gfx2D_DrawTexGeometry(const float* clipXY, const float* uv,
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glUniform1i(s_texUniforms.sampler, 0);
-    GfxUploadTev(&s_texUniforms, tex != 0, r, g, b, a);
+    GfxUploadTev(&s_texUniforms, tex != 0, 0, r, g, b, a);
     glEnableVertexAttribArray(s_texLocPos);
     glVertexAttribPointer(s_texLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
     glEnableVertexAttribArray(s_texLocUV);
@@ -843,7 +884,7 @@ void Gfx3D_DrawTexTris(const float* clipXYZ, const float* uv,
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glUniform1i(s_3dTexUniforms.sampler, 0);
-    GfxUploadTev(&s_3dTexUniforms, tex != 0, r, g, b, a);
+    GfxUploadTev(&s_3dTexUniforms, tex != 0, 0, r, g, b, a);
     glEnableVertexAttribArray(s_3dTexLocPos);
     glVertexAttribPointer(s_3dTexLocPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
     glEnableVertexAttribArray(s_3dTexLocUV);
@@ -865,7 +906,7 @@ void Gfx3D_DrawTexGeometry(const float* clipXYZ, const float* uv,
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glUniform1i(s_3dTexUniforms.sampler, 0);
-    GfxUploadTev(&s_3dTexUniforms, tex != 0, r, g, b, a);
+    GfxUploadTev(&s_3dTexUniforms, tex != 0, 0, r, g, b, a);
     glEnableVertexAttribArray(s_3dTexLocPos);
     glVertexAttribPointer(s_3dTexLocPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
     glEnableVertexAttribArray(s_3dTexLocUV);
@@ -894,7 +935,10 @@ void Gfx2D_DrawSolidTris(const float* clipXY, const float* color, int count,
                 s_colorUpdate ? GL_TRUE : GL_FALSE,
                 s_colorUpdate ? GL_TRUE : GL_FALSE,
                 s_alphaUpdate ? GL_TRUE : GL_FALSE);
-    GfxUploadTev(&s_2dTevUniforms, 0, r, g, b, a);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s_dummyTexture);
+    glUniform1i(s_2dTevUniforms.sampler, 0);
+    GfxUploadTev(&s_2dTevUniforms, 0, 0, r, g, b, a);
     glEnableVertexAttribArray(s_2dTevLocPos);
     glVertexAttribPointer(s_2dTevLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
     glEnableVertexAttribArray(s_2dTevLocColor);
@@ -921,7 +965,10 @@ void Gfx2D_DrawSolidGeometry(const float* clipXY, const float* color,
                 s_colorUpdate ? GL_TRUE : GL_FALSE,
                 s_colorUpdate ? GL_TRUE : GL_FALSE,
                 s_alphaUpdate ? GL_TRUE : GL_FALSE);
-    GfxUploadTev(&s_2dTevUniforms, 0, r, g, b, a);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s_dummyTexture);
+    glUniform1i(s_2dTevUniforms.sampler, 0);
+    GfxUploadTev(&s_2dTevUniforms, 0, 0, r, g, b, a);
     glEnableVertexAttribArray(s_2dTevLocPos);
     glVertexAttribPointer(s_2dTevLocPos, 2, GL_FLOAT, GL_FALSE, 0, clipXY);
     glEnableVertexAttribArray(s_2dTevLocColor);
@@ -936,7 +983,7 @@ void Gfx3D_DrawSolidTris(const float* clipXYZ, const float* color, int count,
     if (s_prog3d == 0 || !clipXYZ || !color || count <= 0) return;
     glUseProgram(s_prog3d);
     GfxApply3DState();
-    GfxUploadTev(&s_3dUniforms, 0, r, g, b, a);
+    glUniform4f(s_loc3dTint, r, g, b, a);
     glEnableVertexAttribArray(s_loc3dPos);
     glVertexAttribPointer(s_loc3dPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
     glEnableVertexAttribArray(s_loc3dVertexColor);
@@ -952,7 +999,7 @@ void Gfx3D_DrawSolidGeometry(const float* clipXYZ, const float* color,
     if (s_prog3d == 0 || !clipXYZ || !color || count <= 0) return;
     glUseProgram(s_prog3d);
     GfxApply3DState();
-    GfxUploadTev(&s_3dUniforms, 0, r, g, b, a);
+    glUniform4f(s_loc3dTint, r, g, b, a);
     glEnableVertexAttribArray(s_loc3dPos);
     glVertexAttribPointer(s_loc3dPos, 3, GL_FLOAT, GL_FALSE, 0, clipXYZ);
     glEnableVertexAttribArray(s_loc3dVertexColor);

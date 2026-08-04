@@ -179,8 +179,10 @@ void Hu3DExec(void) {
                 }
             }
             if (Hu3DCameraNo == 0) {
+#ifndef __SWITCH__
                 HuSprDispInit();
                 HuSprExec(0x7F);
+#endif
             }
             if (FogData.fogType != GX_FOG_NONE) {
                 GXSetFog(FogData.fogType, FogData.fogStart, FogData.fogEnd, camera->near, camera->far, FogData.color);
@@ -275,8 +277,10 @@ void Hu3DExec(void) {
             }
         }
     }
+#ifndef __SWITCH__
     HuSprDispInit();
     HuSprExec(0);
+#endif
     data = Hu3DData;
     for (i = 0; i < HU3D_MODEL_MAX; i++, data++) {
         if (data->hsf != 0 && (data->motId != -1 || (data->attr & HU3D_ATTR_CLUSTER_ON) != 0 || data->motIdShape != -1) && (Hu3DPauseF == 0 || (data->attr & HU3D_ATTR_NOPAUSE) != 0)) {

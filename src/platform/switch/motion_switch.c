@@ -10,6 +10,7 @@
 
 extern const char *SwitchHsfMotionTargetName(const HSFMOTION *motion,
                                               u16 offset);
+extern void SwitchHsfClusterAdjustObject(HSFDATA *model, HSFDATA *motionModel);
 extern void OSReport(const char *msg, ...);
 
 HU3DMOTION Hu3DMotion[HU3D_MOTION_MAX];
@@ -79,22 +80,12 @@ float *GetObjTRXPtr(HSFOBJECT *object, u16 channel) {
 
 static HSFOBJECT *SwitchMotionObject(HSFDATA *model, HSFMOTION *motion,
                                       u16 target) {
-    const char *name;
-    s32 i;
-
-    if (!model || !model->object || target == 0xFFFF) {
+    (void)motion;
+    if (!model || !model->object || target == 0xFFFF ||
+        target >= (u16)model->objectNum) {
         return NULL;
     }
-    name = SwitchHsfMotionTargetName(motion, target);
-    if (!name) {
-        return NULL;
-    }
-    for (i = 0; i < model->objectNum; i++) {
-        if (model->object[i].name && strcmp(model->object[i].name, name) == 0) {
-            return &model->object[i];
-        }
-    }
-    return NULL;
+    return &model->object[target];
 }
 
 static float SwitchMotionBezier(const HSFTRACK *track, float time) {
@@ -230,16 +221,22 @@ void Hu3DMotionExec(s16 modelId, s16 motionId, float time, s32 overlay) {
         HSFTRACK *track = &motion->track[i];
         HSFOBJECT *object;
         float *value;
-        if (track->type != HSF_TRACK_TRANSFORM) {
-            continue;
-        }
-        object = SwitchMotionObject(model, motion, track->target);
-        if (!object) {
-            continue;
-        }
-        value = SwitchMotionValue(object, track->channel);
-        if (value != (float *)-1) {
-            *value = GetCurve(track, time);
+        if (track->type == HSF_TRACK_TRANSFORM) {
+            object = SwitchMotionObject(model, motion, track->target);
+            if (!object) {
+                continue;
+            }
+            value = SwitchMotionValue(object, track->channel);
+            if (value != (float *)-1) {
+                *value = GetCurve(track, time);
+            }
+        } else if (track->type == HSF_TRACK_MORPH &&
+                   track->morphWeight >= 0 && track->morphWeight < 33) {
+            object = SwitchMotionObject(model, motion, track->target);
+            if (object) {
+                object->mesh.mesh.morphWeight[track->morphWeight] =
+                    GetCurve(track, time);
+            }
         }
     }
     (void)modelData;
@@ -290,6 +287,38 @@ void Hu3DMotionNext(s16 modelId) {
                                 SwitchMotionData(model->motIdOvl), model->motAttr,
                                 HU3D_MOTATTR_OVL_PAUSE, HU3D_MOTATTR_OVL_REV,
                                 HU3D_MOTATTR_OVL_LOOP);
+    }
+    if (model->motIdShape != -1 && SwitchMotionIDOK(model->motIdShape)) {
+        SwitchMotionWorkAdvance(&model->motShapeWork,
+                                SwitchMotionData(model->motIdShape),
+                                model->motAttr,
+                                HU3D_MOTATTR_SHAPE_PAUSE,
+                                HU3D_MOTATTR_SHAPE_REV,
+                                HU3D_MOTATTR_SHAPE_LOOP);
+    }
+    if (model->attr & HU3D_ATTR_CLUSTER_ON) {
+        s32 i;
+        for (i = 0; i < 4; i++) {
+            if (model->motIdCluster[i] != -1 &&
+                SwitchMotionIDOK(model->motIdCluster[i]) &&
+                !(model->clusterAttr[i] & HU3D_CLUSTER_ATTR_PAUSE)) {
+                HSFMOTION *motion = SwitchMotionData(model->motIdCluster[i]);
+                float maxTime = motion ? motion->maxTime : 0.0f;
+                float direction =
+                    (model->clusterAttr[i] & HU3D_CLUSTER_ATTR_REV) ? -1.0f : 1.0f;
+                model->clusterTime[i] += model->clusterSpeed[i] *
+                                         minimumVcountf * direction;
+                if (model->clusterAttr[i] & HU3D_CLUSTER_ATTR_LOOP) {
+                    if (maxTime > 0.0f) {
+                        while (model->clusterTime[i] < 0.0f) model->clusterTime[i] += maxTime;
+                        while (model->clusterTime[i] >= maxTime) model->clusterTime[i] -= maxTime;
+                    }
+                } else {
+                    if (model->clusterTime[i] < 0.0f) model->clusterTime[i] = 0.0f;
+                    if (model->clusterTime[i] > maxTime) model->clusterTime[i] = maxTime;
+                }
+            }
+        }
     }
 }
 
@@ -544,14 +573,38 @@ void Hu3DMotionShiftSet(s16 modelId, s16 motionId, float time, float end,
 }
 
 s16 Hu3DMotionClusterSet(s16 modelId, s16 motionId) {
-    (void)modelId;
-    (void)motionId;
+    s16 i;
+    if (modelId < 0 || modelId >= HU3D_MODEL_MAX ||
+        !SwitchMotionIDOK(motionId)) {
+        return -1;
+    }
+    for (i = 0; i < 4; i++) {
+        if (Hu3DData[modelId].motIdCluster[i] == -1) {
+            Hu3DData[modelId].motIdCluster[i] = motionId;
+            Hu3DData[modelId].clusterTime[i] = 0.0f;
+            Hu3DData[modelId].clusterSpeed[i] = 1.0f;
+            Hu3DData[modelId].clusterAttr[i] = HU3D_ATTR_NONE;
+            Hu3DData[modelId].attr |= HU3D_ATTR_CLUSTER_ON;
+            SwitchHsfClusterAdjustObject(Hu3DData[modelId].hsf,
+                                          Hu3DMotion[motionId].hsf);
+            return i;
+        }
+    }
+    OSReport("Switch: cluster motion slots full\n");
     return -1;
 }
 
 void Hu3DMotionShapeSet(s16 modelId, s16 motionId) {
-    (void)modelId;
-    (void)motionId;
+    if (modelId < 0 || modelId >= HU3D_MODEL_MAX ||
+        !SwitchMotionIDOK(motionId)) {
+        return;
+    }
+    Hu3DData[modelId].motIdShape = motionId;
+    Hu3DData[modelId].motShapeWork.time = 0.0f;
+    Hu3DData[modelId].motShapeWork.speed = 1.0f;
+    Hu3DData[modelId].motShapeWork.start = 0.0f;
+    Hu3DData[modelId].motShapeWork.end =
+        Hu3DMotionMotionMaxTimeGet(motionId);
 }
 
 s16 Hu3DMotionShapeIDGet(s16 modelId) {
