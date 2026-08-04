@@ -570,6 +570,8 @@ static void DecodeGCTexture(int fmt, const unsigned char* src, int w, int h,
     }
 }
 
+unsigned int g_texHit, g_texMiss, g_texUpload, g_texProbe;
+
 static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
     if (!obj || !obj->data) return 0;
     for (int i = 0; i < s_texCacheN; i++)
@@ -579,8 +581,10 @@ static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
             s_texCache[i].palette_fmt == obj->palette_fmt &&
             s_texCache[i].wrap_s == obj->wrap_s &&
             s_texCache[i].wrap_t == obj->wrap_t) {
+            g_texHit++; g_texProbe += (unsigned int)i;
             return s_texCache[i].tex;
         }
+    g_texMiss++;
 
     int w = obj->w, h = obj->h;
     if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return 0;
@@ -588,6 +592,7 @@ static unsigned int GetOrCreateTexture(const MyTexObj* obj) {
     DecodeGCTexture(obj->fmt, (const unsigned char*)obj->data, w, h, obj, buf);
     unsigned int tex = GfxCreateTexture(w, h, buf,
                                         obj->wrap_s, obj->wrap_t);
+    g_texUpload++;
     if (s_texCacheN < TEXCACHE_MAX) {
         s_texCache[s_texCacheN].key = obj->data;
         s_texCache[s_texCacheN].palette = obj->palette;
@@ -887,6 +892,10 @@ void GXGLReportFrameStats(void) {
         g_hsfTexCalls = g_hsfTexReflect = g_hsfTexNoAttr = 0;
         g_hsfTexNoBmp = g_hsfTexLoaded = 0;
     }
+    OSReport("TexCache: hit=%u miss=%u upload=%u avgProbe=%u entries=%d\n",
+             g_texHit, g_texMiss, g_texUpload,
+             g_texHit ? g_texProbe / g_texHit : 0, s_texCacheN);
+    g_texHit = g_texMiss = g_texUpload = g_texProbe = 0;
     s_dbgTexDraws = 0;
     s_dbgNoTexDraws = 0;
     s_dbgEmptyDraws = 0;
