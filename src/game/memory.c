@@ -156,12 +156,32 @@ s32 HuMemMemoryAllocSizeGet(s32 size)
 
 void HuMemHeapDump(void *heap_ptr, s16 status)
 {
+#ifdef __SWITCH__
+    (void)heap_ptr;
+    (void)status;
+    OSReport("HuMem> heap dump skipped on Switch\n");
+    return;
+#else
     struct memory_block *block = heap_ptr;
+    u32 guard = 0;
+    uintptr_t heap_start = (uintptr_t)heap_ptr;
+    uintptr_t heap_end = heap_start;
     s32 size = 0;
     s32 inactive_size = 0;
     s32 num_blocks = 0;
     s32 num_unused_blocks = 0;
     u8 dump_type;
+
+    for (s32 heap_id = 0; heap_id < HEAP_MAX; heap_id++) {
+        if (HuMemHeapPtrGet((HeapID)heap_id) == heap_ptr) {
+            heap_end += HuMemHeapSizeGet((HeapID)heap_id);
+            break;
+        }
+    }
+    if (heap_end == heap_start) {
+        OSReport("HuMem> heap dump aborted: unknown heap %08x\n", heap_ptr);
+        return;
+    }
 
     if(status < 0) {
         dump_type = 10;
@@ -173,6 +193,17 @@ void HuMemHeapDump(void *heap_ptr, s16 status)
     OSReport("======== HuMem heap dump %08x ========\n", heap_ptr);
     OSReport("MCB-----+Size----+MG+FL+Prev----+Next----+UNum----+Body----+Call----\n");
     do {
+        uintptr_t block_address = (uintptr_t)block;
+        if (guard++ >= 64) {
+            OSReport("HuMem> heap dump aborted: block chain did not return to its head\n");
+            break;
+        }
+        if (block_address < heap_start || block_address + 32 > heap_end ||
+            (block_address & 31) != 0) {
+            OSReport("HuMem> heap dump aborted: invalid block %08x in heap %08x-%08x\n",
+                block, heap_start, heap_end);
+            break;
+        }
         if(dump_type == 10 || block->flag == dump_type) {
             OSReport("%08x %08x %02x %02x %08x %08x %08x %08x %08x\n", block, block->size, block->magic, block->flag,
                 block->prev, block->next, block->num, BLOCK_GET_DATA(block), block->retaddr);
@@ -185,11 +216,18 @@ void HuMemHeapDump(void *heap_ptr, s16 status)
             num_unused_blocks++;
         }
         
+        if ((uintptr_t)block->next < heap_start ||
+            (uintptr_t)block->next + 32 > heap_end ||
+            ((uintptr_t)block->next & 31) != 0) {
+            OSReport("HuMem> heap dump aborted: invalid next block %08x\n", block->next);
+            break;
+        }
         block = block->next;
     } while(block != heap_ptr);
     OSReport("MCB:%d(%d/%d) MEM:%08x(%08x/%08x)\n", num_blocks+num_unused_blocks, num_blocks, num_unused_blocks, 
         size+inactive_size, size, inactive_size);
     OSReport("======== HuMem heap dump %08x end =====\n", heap_ptr);
+#endif
 }
 
 s32 HuMemMemorySizeGet(void *ptr)
