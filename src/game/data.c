@@ -606,8 +606,13 @@ static void *HuDataDecodeIt(void *bufP, s32 bufOfs, s32 num, HeapID heap)
 		dataStart = data;
 	} else {
 		s32 *data = buf;
+#ifdef __SWITCH__
+		rawLen = __builtin_bswap32((u32)*data++);
+		decodeType = __builtin_bswap32((u32)*data++);
+#else
 		rawLen = *data++;
 		decodeType = *data++;
+#endif
 		dataStart = data;
 	}
 	switch(heap) {
@@ -633,6 +638,15 @@ static void *HuDataDecodeIt(void *bufP, s32 bufOfs, s32 num, HeapID heap)
     return dest;
 }
 
+
+static u32 HuDataReadU32(const u32 *value)
+{
+#ifdef __SWITCH__
+	return __builtin_bswap32(*value);
+#else
+	return *value;
+#endif
+}
 
 void *HuDataReadNumHeapShortForce(s32 dataNum, s32 num, HeapID heap)
 {
@@ -663,7 +677,7 @@ void *HuDataReadNumHeapShortForce(s32 dataNum, s32 num, HeapID heap)
 		DVDClose(&fileInfo);
 		return NULL;
 	}
-	fileNumMax = *fileData;
+	fileNumMax = HuDataReadU32((u32 *)fileData);
 	if(fileNumMax <= fileNum) {
 		HuMemDirectFree(fileData);
 		OSReport("data.c%d: Data Number Error(0x%08x)\n", 1005, dataNum);
@@ -672,14 +686,14 @@ void *HuDataReadNumHeapShortForce(s32 dataNum, s32 num, HeapID heap)
 	}
 	dataHdr = fileData;
 	dataHdr += fileNum+1;
-	fileOfs = *dataHdr;
+	fileOfs = HuDataReadU32((u32 *)dataHdr);
 	readOfs = OSRoundDown32B(fileOfs);
 	if(fileNumMax <= fileNum+1) {
 		readLen = fileInfo.length;
 		dataOfs = readLen-readOfs;
 	} else {
 		dataHdr++;
-		dataOfs = (*dataHdr)-readOfs;
+		dataOfs = HuDataReadU32((u32 *)dataHdr)-readOfs;
 		readLen = fileInfo.length;
 	}
 	readLen = OSRoundUp32B(dataOfs);

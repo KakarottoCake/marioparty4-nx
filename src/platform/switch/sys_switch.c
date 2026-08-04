@@ -9,6 +9,23 @@
 #include "dolphin/gx/GXStruct.h"
 #include "game/memory.h"
 
+typedef struct Hu3DModel_s HU3DMODEL;
+typedef struct HsfData_s HSFDATA;
+
+void SwitchHsfClusterMotionExec(HU3DMODEL *model);
+void SwitchHsfShapeProc(HSFDATA *model);
+void SwitchHsfClusterProc(HU3DMODEL *model);
+
+BOOL SwitchAudioInit(void);
+void SwitchAudioTick(void);
+void SwitchAudioPlayTone(u32 frequency);
+s32 SwitchAudioPlayEffect(u32 effectId);
+s32 SwitchAudioPlayEffectVolPan(u32 effectId, s16 volume, s16 pan);
+BOOL SwitchAudioStartStream(u32 streamId);
+void SwitchAudioFadeOutStream(s32 speed);
+void SwitchAudioStopStream(void);
+void SwitchAudioExit(void);
+
 // Background/clear color the engine last requested (via GXSetCopyClear).
 static GXColor s_bgColor = {0, 0, 0, 0};
 
@@ -40,6 +57,7 @@ void HuSysInit(void* mode) {
     minimumVcount = 1;
     minimumVcountf = 1.0f;
     HuMemInitAll();
+    SwitchAudioInit();
 }
 void GWInit(void) {}
 void pfInit(void) {}
@@ -89,7 +107,7 @@ void pfClsScr(void) {}
 void MGSeqMain(void) {}
 void WipeExecAlways(void) {}
 void pfDrawFonts(void) {}
-void msmMusFdoutEnd(void) {}
+void msmMusFdoutEnd(void) { SwitchAudioTick(); }
 
 // Dolphin pad/OS/VI/SI library stubs
 void PADSetSpec(u32 spec) {}
@@ -107,6 +125,7 @@ void VIWaitForRetrace(void) {
     for (int i = 0; i < 4; i++) {
         u64 kDown = padGetButtonsDown(&g_Pads[i]);
         if (kDown & (HidNpadButton_Plus | HidNpadButton_Minus)) {
+            SwitchAudioExit();
             GfxExit();
             romfsExit();
             exit(0);
@@ -121,14 +140,14 @@ void Hu3DDrawPost(void) {}
 void Hu3DAnimExec(void) {}
 void GXInvalidateVtxCache(void) {}
 void GXWaitDrawDone(void) {}
-void ClusterMotionExec(void) {}
+void ClusterMotionExec(HU3DMODEL *model) { SwitchHsfClusterMotionExec(model); }
 void GXSetDrawDone(void) {}
 void InitVtxParm(void) {}
 void PPCSync(void) {}
 void GXSetFog(s32 type, float start, float end, float near, float far, void* color) {}
-void ShapeProc(void) {}
-void ClusterProc(void) {}
-void EnvelopeProc(void) {}
+void ShapeProc(HSFDATA *model) { SwitchHsfShapeProc(model); }
+void ClusterProc(HU3DMODEL *model) { SwitchHsfClusterProc(model); }
+void EnvelopeProc(HSFDATA *model) { (void)model; }
 
 // Additional Dolphin GX/MTX library stubs (loose no-ops).
 // NOTE: matrices, GXSetProjection/GXLoadPosMtxImm, GXBegin/GXPosition/GXTexCoord/
@@ -173,13 +192,33 @@ void HuWinHomeClear(s16 win) {}
 void HuWinKill(s16 win) {}
 void HuTHPClose(void) {}
 void WipeColorSet(u8 r, u8 g, u8 b) {}
-void HuAudSStreamAllFadeOut(s32 fade) {}
+void HuAudSStreamStop(s32 streamNo) {
+    (void)streamNo;
+    SwitchAudioStopStream();
+}
+void HuAudSStreamFadeOut(s32 streamNo, s32 speed) {
+    (void)streamNo;
+    SwitchAudioFadeOutStream(speed);
+}
+void HuAudSStreamAllFadeOut(s32 fade) { SwitchAudioFadeOutStream(fade); }
+void HuAudSStreamAllStop(void) { SwitchAudioStopStream(); }
 
 // More bootDll stubs
 s32 msmSeGetEntryID(s32 id) { return 0; }
 s32 msmSeGetNumPlay(s32 id) { return 0; }
-void HuAudSStreamPlay(s32 id) {}
-void HuAudFXPlay(s32 id) {}
+s32 HuAudSStreamPlay(s32 id) {
+    if (id >= 0) {
+        return SwitchAudioStartStream((u32)id) ? 0 : -1;
+    }
+    return -1;
+}
+s32 HuAudFXPlay(s32 id) { return SwitchAudioPlayEffect((u32)id); }
+s32 HuAudFXPlayVol(s32 id, s16 volume) {
+    return SwitchAudioPlayEffectVolPan((u32)id, volume, 64);
+}
+s32 HuAudFXPlayVolPan(s32 id, s16 volume, s16 pan) {
+    return SwitchAudioPlayEffectVolPan((u32)id, volume, pan);
+}
 u32 OSGetTick(void) { return (u32)armGetSystemTick(); }
 void CharInit(void) {}
 void HuWindowInit(void) {}
