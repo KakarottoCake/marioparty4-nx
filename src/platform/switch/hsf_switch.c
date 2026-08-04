@@ -3181,7 +3181,13 @@ static void SwitchHsfEmitIndex(const HSFOBJECT *object, const s16 *index,
         GXColor4u8(color[index[2]].r, color[index[2]].g,
                    color[index[2]].b, color[index[2]].a);
     }
-    if (object->mesh.st && object->mesh.st->data &&
+    /* The original gates texture coordinates on the material having at least
+     * one attribute (its stF flag), not on the index looking usable.  A
+     * material with no attributes never uses index[3], so that slot holds
+     * unused data; reading it produced out-of-range indices and, where it
+     * happened to land in range, texture coordinates that smeared one texel
+     * across the surface. */
+    if (attribute && object->mesh.st && object->mesh.st->data &&
         index[3] >= 0 && index[3] < object->mesh.st->count) {
         const HuVec2f *st = (const HuVec2f *)object->mesh.st->data;
         float u = st[index[3]].x;
@@ -3282,9 +3288,16 @@ static void SwitchHsfRenderFaces(const HSFOBJECT *object, s16 materialCount,
                                    useVertexColor, textureAttribute);
             }
         } else {
+            /* The original renderer walks a triangle as 0,2,1 and a quad as
+             * 0,2,3,1.  Emitting them in plain index order reverses the
+             * winding of every face, so backface culling then removes the
+             * front of the model instead of the back. */
+            static const s32 triCorner[3] = {0, 2, 1};
+            static const s32 quadCorner[4] = {0, 2, 3, 1};
+            const s32 *order = (type == HSF_FACE_QUAD) ? quadCorner : triCorner;
             for (corner = 0; corner < needed; corner++) {
-                SwitchHsfEmitVertex(object, face, corner, useVertexColor,
-                                    textureAttribute);
+                SwitchHsfEmitVertex(object, face, order[corner],
+                                    useVertexColor, textureAttribute);
             }
         }
         vertices += needed;
