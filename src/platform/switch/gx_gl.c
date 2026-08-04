@@ -861,6 +861,24 @@ void GXBegin(GXPrimitive type, GXVtxFmt fmt, u16 nverts) {
     s_curVertexColor[3] = 1.0f;
 }
 
+// Per-frame bounds of transformed geometry, in normalized device coordinates.
+// Anything visible must land inside -1..1 on x and y, so these numbers say
+// immediately whether the camera/projection math is putting geometry on screen.
+static float s_dbgTint[4];
+static int s_dbgStages = 0;
+static unsigned int s_dbgTexDraws = 0;
+static unsigned int s_dbgNoTexDraws = 0;
+static unsigned int s_dbgEmptyDraws = 0;
+
+void GXGLReportFrameStats(void) {
+    OSReport("GXGL: texDraws=%u solidDraws=%u tint[%.2f %.2f %.2f %.2f] stages=%d\n",
+             s_dbgTexDraws, s_dbgNoTexDraws, s_dbgTint[0], s_dbgTint[1],
+             s_dbgTint[2], s_dbgTint[3], s_dbgStages);
+    s_dbgTexDraws = 0;
+    s_dbgNoTexDraws = 0;
+    s_dbgEmptyDraws = 0;
+}
+
 void GXPosition3f32(f32 x, f32 y, f32 z) {
     if (s_vCount >= MAXV) return;
     // world = posMtx * (x,y,z,1)
@@ -971,6 +989,11 @@ void GXEnd(void) {
             color[i * 4 + 3] = s_vColor[i][3];
         }
         GXGLPushTevState();
+        s_dbgTint[0] = s_tint[0];
+        s_dbgTint[1] = s_tint[1];
+        s_dbgTint[2] = s_tint[2];
+        s_dbgTint[3] = s_tint[3];
+        s_dbgStages = s_tevState.numStages;
         float drawTint[4] = {
             s_useMaterialTint ? s_tint[0] : 1.0f,
             s_useMaterialTint ? s_tint[1] : 1.0f,
@@ -980,6 +1003,7 @@ void GXEnd(void) {
         unsigned int drawTex = 0;
         int map = s_tevState.stages[0].texMap;
         if (map >= GX_TEXMAP0 && map <= GX_TEXMAP7) drawTex = s_texMaps[map];
+        if (drawTex) s_dbgTexDraws++; else s_dbgNoTexDraws++;
         int primitive = s_prim == GX_LINESTRIP ? 1 :
                         (s_prim == GX_POINTS ? 2 : 0);
         if (drawTex) {
@@ -1089,6 +1113,13 @@ void GXEnd(void) {
             drawTex = s_texMaps[map];
         }
     }
+    s_dbgTint[0] = drawTint[0];
+    s_dbgTint[1] = drawTint[1];
+    s_dbgTint[2] = drawTint[2];
+    s_dbgTint[3] = drawTint[3];
+    s_dbgStages = s_tevState.numStages;
+    if (drawTex) s_dbgTexDraws++; else s_dbgNoTexDraws++;
+    if (n == 0) s_dbgEmptyDraws++;
     if (drawTex) {
         if (s_3dMode) {
             Gfx3D_DrawTexTris(clipXYZ, uv, color, n, drawTex,

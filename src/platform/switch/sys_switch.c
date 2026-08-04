@@ -34,7 +34,21 @@ void* GXNtsc480IntDf = NULL;
 void* GXPal528IntDf = NULL;
 // RenderMode is dereferenced by the engine (e.g. sprput.c RenderMode->field_rendering),
 // so it must point at a real render-mode object, not be a scalar.
-static GXRenderModeObj s_renderMode = {0};
+// Matches the GameCube NTSC 480i de-flicker mode the engine boots with.
+// These dimensions are not cosmetic: Hu3DCameraCreate seeds every camera's
+// viewport AND scissor from fbWidth/efbHeight, so leaving them zero makes the
+// engine issue GXSetScissor(0,0,0,0) each frame and clip the whole screen away.
+static GXRenderModeObj s_renderMode = {
+    .fbWidth = 640,
+    .efbHeight = 480,
+    .xfbHeight = 480,
+    .viXOrigin = 0,
+    .viYOrigin = 0,
+    .viWidth = 640,
+    .viHeight = 480,
+    .field_rendering = 0,
+    .aa = 0,
+};
 GXRenderModeObj* RenderMode = &s_renderMode;
 s32 minimumVcount = 0;
 float minimumVcountf = 0.0f;
